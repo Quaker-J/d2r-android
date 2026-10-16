@@ -130,16 +130,22 @@ static int dependencies_gpu_unknown_reason(uintptr_t address,uint64_t size,uint6
 static int dependencies_shader_unknown(const shader_entry *shader) {
     if(!shader)return 0;
     for(unsigned i=0;i<shader->count;i++){
-        const shader_binding *binding=&shader->bindings[i];VkDescriptorType type=descriptor_type(binding);
+        const shader_binding *binding=&shader->bindings[i];
+        const shader_binding_plan *plan=shader->binding_plan?&shader->binding_plan[i]:NULL;
+        VkDescriptorType type=plan?plan->type:descriptor_type(binding);
         if(type==VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER){
             if(binding->kind==0||binding->slot<3||binding->slot>=19)continue;
             const p_bind_buf *u=&state.ubo[shader->stage][binding->slot-3];
             if(u->addr&&dependencies_unknown(u->addr,u->size<65536?u->size:65536))return DEP_UBO;
         }else if(type==VK_DESCRIPTOR_TYPE_STORAGE_BUFFER){
-            unsigned base=shader->stage==0?0x110:shader->stage==5?0x310:0x510;int off=binding->cb_offset*4;
-            int uniform_pointer=shader->stage==5&&off>=0x210&&off<0x310;
-            int slot=(off-(uniform_pointer?0x210:(int)base))/16;
-            if(binding->cb_slot!=0||slot<0||slot>=16)die("Vulkan dependency storage mapping: shader=%s cb=%u offset=%#x",shader->key,binding->cb_slot,off);
+            int uniform_pointer,slot;
+            if(plan){uniform_pointer=plan->uniform_pointer;slot=plan->storage_slot;}
+            else{
+                unsigned base=shader->stage==0?0x110:shader->stage==5?0x310:0x510;int off=binding->cb_offset*4;
+                uniform_pointer=shader->stage==5&&off>=0x210&&off<0x310;
+                slot=(off-(uniform_pointer?0x210:(int)base))/16;
+                if(binding->cb_slot!=0||slot<0||slot>=16)die("Vulkan dependency storage mapping: shader=%s cb=%u offset=%#x",shader->key,binding->cb_slot,off);
+            }
             const p_bind_buf *u=uniform_pointer?&state.ubo[shader->stage][slot]:&state.ssbo[shader->stage][slot];
             // 可写 buffer 也读取初值；反射只有 Write 位，不能把它当作纯覆盖输出。
             // Writable buffers also read their initial contents; reflection has only a Write bit, not a write-only guarantee.

@@ -90,13 +90,13 @@ static void draw_graphics(const p_draw *draw,const p_draw_idx *indexed) {
     // Metal 的裁剪空间 Y 向上，Vulkan 的正高度视口 Y 向下；用负高度保持 NVN 画面方向。
     // Metal clip Y points up while Vulkan's positive viewport points down; a negative viewport preserves NVN orientation.
     viewport.y += viewport.height; viewport.height = -viewport.height;
-    pipeline_key key={.vs=vs,.fs=fs,.colors=state.rt.n,.primitive=primitive,.color=state.color,.mask=state.mask,.polygon=state.polygon,.depth=state.depth,.multisample=state.multisample,.attachments=na,.depth_attachment=depth.attachment};
+    pipeline_key key={.vs=vs,.fs=fs,.colors=state.rt.n,.primitive=primitive,.color=state.color,.mask=state.mask,.polygon=state.polygon,.depth=depth.attachment!=VK_ATTACHMENT_UNUSED?state.depth:(ds_st){0},.multisample=state.multisample,.attachments=na,.depth_attachment=depth.attachment};
 #ifdef __ANDROID__
     key.required_subgroup_size=vk_api.requested_subgroup_size;
 #endif
-    for(int i=0;i<state.rt.n;i++){key.color_indices[i]=colors[i].attachment;if(colors[i].attachment!=VK_ATTACHMENT_UNUSED)key.formats[i]=attachments[colors[i].attachment].format;}
+    for(int i=0;i<state.rt.n;i++){key.color_indices[i]=colors[i].attachment;if(colors[i].attachment!=VK_ATTACHMENT_UNUSED)key.formats[i]=attachments[colors[i].attachment].format;if((state.color.blend_en>>i)&1)key.blend[i]=state.blend[i];}
     if(depth.attachment!=VK_ATTACHMENT_UNUSED)key.formats[8]=attachments[depth.attachment].format;
-    memcpy(key.attributes,state.attributes,sizeof key.attributes);memcpy(key.streams,state.streams,sizeof key.streams);memcpy(key.blend,state.blend,sizeof key.blend);
+    for(unsigned i=0;i<16;i++){if(state.attributes[i].fmt&&vs->attributes[i])key.attributes[i]=state.attributes[i];if(stream_used[i])key.streams[i]=state.streams[i];}
     // 持久 pipeline 链只追加，queue_lock 串行访问；完整 key 相同才绕过哈希查找。
     // Persistent pipelines are append-only and accessed under queue_lock; only a full-key match bypasses hashing.
     unsigned pipeline_bucket=0;pipeline_entry *cached=graphics_last_pipeline;
@@ -113,7 +113,7 @@ static void draw_graphics(const p_draw *draw,const p_draw_idx *indexed) {
         VkPipelineDepthStencilStateCreateInfo ds={.sType=VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,.depthTestEnable=state.depth.dt,.depthWriteEnable=state.depth.dw,.depthCompareOp=state.depth.df?state.depth.df-1:VK_COMPARE_OP_ALWAYS,.stencilTestEnable=state.depth.st,.front=state.stencil_faces[0],.back=state.stencil_faces[1]};
         ds.front.failOp=state.depth.fail_f?state.depth.fail_f-1:VK_STENCIL_OP_KEEP;ds.front.passOp=state.depth.zpass_f?state.depth.zpass_f-1:VK_STENCIL_OP_KEEP;ds.front.depthFailOp=state.depth.zfail_f?state.depth.zfail_f-1:VK_STENCIL_OP_KEEP;ds.front.compareOp=state.depth.sf_f?state.depth.sf_f-1:VK_COMPARE_OP_ALWAYS;
         ds.back.failOp=state.depth.fail_b?state.depth.fail_b-1:VK_STENCIL_OP_KEEP;ds.back.passOp=state.depth.zpass_b?state.depth.zpass_b-1:VK_STENCIL_OP_KEEP;ds.back.depthFailOp=state.depth.zfail_b?state.depth.zfail_b-1:VK_STENCIL_OP_KEEP;ds.back.compareOp=state.depth.sf_b?state.depth.sf_b-1:VK_COMPARE_OP_ALWAYS;
-        VkPipelineColorBlendAttachmentState blend[8];for(int i=0;i<state.rt.n;i++){blend_st b=state.blend[i];blend[i]=(VkPipelineColorBlendAttachmentState){.blendEnable=(state.color.blend_en>>i)&1,.srcColorBlendFactor=blend_factor(b.src_rgb),.dstColorBlendFactor=blend_factor(b.dst_rgb),.colorBlendOp=blend_operation(b.eq_rgb),.srcAlphaBlendFactor=blend_factor(b.src_a),.dstAlphaBlendFactor=blend_factor(b.dst_a),.alphaBlendOp=blend_operation(b.eq_a),.colorWriteMask=(state.mask.mask>>(4*i))&15};}
+        VkPipelineColorBlendAttachmentState blend[8];for(int i=0;i<state.rt.n;i++){blend_st b=key.blend[i];blend[i]=(VkPipelineColorBlendAttachmentState){.blendEnable=(state.color.blend_en>>i)&1,.srcColorBlendFactor=blend_factor(b.src_rgb),.dstColorBlendFactor=blend_factor(b.dst_rgb),.colorBlendOp=blend_operation(b.eq_rgb),.srcAlphaBlendFactor=blend_factor(b.src_a),.dstAlphaBlendFactor=blend_factor(b.dst_a),.alphaBlendOp=blend_operation(b.eq_a),.colorWriteMask=(state.mask.mask>>(4*i))&15};}
         VkPipelineColorBlendStateCreateInfo color={.sType=VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,.attachmentCount=state.rt.n,.pAttachments=blend};memcpy(color.blendConstants,state.blend_color.rgba,16);
         VkPipelineShaderStageCreateInfo stages[2]={{.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,.stage=VK_SHADER_STAGE_VERTEX_BIT,.module=vs->module,.pName="main"},{.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,.stage=VK_SHADER_STAGE_FRAGMENT_BIT,.module=fs->module,.pName="main"}};
         VkDynamicState dynamic_states[]={VK_DYNAMIC_STATE_VIEWPORT,VK_DYNAMIC_STATE_SCISSOR,VK_DYNAMIC_STATE_BLEND_CONSTANTS,VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK,VK_DYNAMIC_STATE_STENCIL_WRITE_MASK,VK_DYNAMIC_STATE_STENCIL_REFERENCE,VK_DYNAMIC_STATE_DEPTH_BIAS};

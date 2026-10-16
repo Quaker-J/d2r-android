@@ -162,9 +162,12 @@ static void async_overlay_chain(const post_op *copies,uintptr_t address,void *de
     }
 }
 
+static int async_known_copy_may_overlap(const async_batch *batch,uintptr_t address,uint64_t size);
+
 static void async_overlay_copies(uintptr_t address,void *destination,uint64_t size) {
-    for(const async_batch *b=async_first;b;b=b->next)async_overlay_chain(b->copies,address,destination,size);
-    async_overlay_chain(post_copy_first,address,destination,size);
+    if(!size||size>UINTPTR_MAX-address)return;
+    for(const async_batch *b=async_first;b;b=b->next)if(async_known_copy_may_overlap(b,address,size))async_overlay_chain(b->copies,address,destination,size);
+    if(async_known_copy_may_overlap(async_current,address,size))async_overlay_chain(post_copy_first,address,destination,size);
 }
 
 static const post_op *async_version_chain(const post_op *copies,uintptr_t address,uint64_t size,const post_op *version) {
@@ -174,9 +177,11 @@ static const post_op *async_version_chain(const post_op *copies,uintptr_t addres
 }
 
 static const post_op *async_copy_version(uintptr_t address,uint64_t size) {
+    if(!size||size>UINTPTR_MAX-address)return NULL;
     const post_op *version=NULL;
-    for(const async_batch *b=async_first;b;b=b->next)version=async_version_chain(b->copies,address,size,version);
-    return async_version_chain(post_copy_first,address,size,version);
+    for(const async_batch *b=async_first;b;b=b->next)if(async_known_copy_may_overlap(b,address,size))version=async_version_chain(b->copies,address,size,version);
+    if(async_known_copy_may_overlap(async_current,address,size))version=async_version_chain(post_copy_first,address,size,version);
+    return version;
 }
 
 static int async_copy_pending(uintptr_t address,uint64_t size) {

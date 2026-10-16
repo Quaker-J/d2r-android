@@ -8,7 +8,7 @@
 
 enum { DM_PENDING_CHUNK_NODES=64 };
 struct dm_pending_range_node {
-    uintptr_t start,end,max_end;
+    uintptr_t start,end,min_start,max_end;
     unsigned height;
     dm_pending_range_node *left,*right;
 };
@@ -42,7 +42,7 @@ static dm_pending_range_node *node_new(dm_pending_ranges *ranges,uintptr_t start
         ranges->current=ranges->current->next;
     }
     dm_pending_range_node *node=&ranges->current->nodes[ranges->current->used++];
-    *node=(dm_pending_range_node){.start=start,.end=end,.max_end=end,.height=1,.left=left,.right=right};
+    *node=(dm_pending_range_node){.start=start,.end=end,.min_start=left?left->min_start:start,.max_end=end,.height=1,.left=left,.right=right};
     if(left)node->max_end=maximum(node->max_end,left->max_end);
     if(right)node->max_end=maximum(node->max_end,right->max_end);
     unsigned lh=height(left),rh=height(right);node->height=1+(lh>rh?lh:rh);
@@ -127,7 +127,7 @@ int dm_pending_ranges_overlap(const dm_pending_ranges *ranges,dm_pending_kind ki
     }
     if(!low)return 0;
     const dm_pending_range_node *node=collection->versions[low-1].root;uintptr_t end=address+(uintptr_t)size;
-    while(node) {
+    while(node&&address<node->max_end&&end>node->min_start) {
         if(visited)(*visited)++;
         if(address<node->end&&node->start<end)return 1;
         // 若左子树末端超过起点，则存在可能命中；若其无命中，按起点排序的右子树也不可能命中。

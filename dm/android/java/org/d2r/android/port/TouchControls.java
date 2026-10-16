@@ -96,7 +96,7 @@ final class TouchControls {
             publishedButtons = buttons; publishedX = x; publishedY = y;
             listener.onPad(buttons, x, y);
         }
-        for (ControlView group : groups) group.invalidate();
+        for (ControlView group : groups) group.invalidateIfChanged();
     }
 
     private void layout() {
@@ -182,6 +182,10 @@ final class TouchControls {
         final PopupWindow popup;
         final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         float unit, windowX, windowY;
+        final long keyMask;
+        boolean drawnInitialized, drawnActive;
+        int drawnX, drawnY;
+        long drawnPressed;
 
         ControlView(int source, boolean stick, int width, int height, Key... keys) {
             super(activity);
@@ -191,7 +195,9 @@ final class TouchControls {
             setFocusable(false);
             setClickable(true);
             setContentDescription(text(stick ? "dmAndroidTouchMove" : "dmAndroidTouchButtons"));
-            for (Key key : keys) key.label = text("dmAndroidPad" + key.name);
+            long mask = 0;
+            for (Key key : keys) { key.label = text("dmAndroidPad" + key.name); mask |= key.button; }
+            this.keyMask = mask;
             popup = new PopupWindow(this, pixelWidth(), pixelHeight(), false);
             popup.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
             popup.setTouchModal(false);
@@ -200,6 +206,23 @@ final class TouchControls {
             popup.setInputMethodMode(PopupWindow.INPUT_METHOD_NOT_NEEDED);
             popup.setElevation(0);
             popup.setOnDismissListener(() -> { state.cancelSource(source); publish(); });
+        }
+
+        void invalidateIfChanged() {
+            if (stick) {
+                boolean active = state.stickPointer() >= 0;
+                int x = state.leftX(), y = state.leftY();
+                if (!drawnInitialized || active != drawnActive || x != drawnX || y != drawnY) {
+                    drawnInitialized = true; drawnActive = active; drawnX = x; drawnY = y;
+                    invalidate();
+                }
+            } else {
+                long pressed = state.buttons() & keyMask;
+                if (!drawnInitialized || pressed != drawnPressed) {
+                    drawnInitialized = true; drawnPressed = pressed;
+                    invalidate();
+                }
+            }
         }
 
         int pixelWidth() { return Math.round(logicalWidth * unit); }

@@ -11,7 +11,7 @@ static pthread_mutex_t pipeline_disk_mutex=PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t pipeline_disk_join_mutex=PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t pipeline_disk_condition=PTHREAD_COND_INITIALIZER;
 static pthread_t pipeline_disk_thread;
-static int pipeline_disk_dir=-1,pipeline_disk_lock=-1,pipeline_disk_started,pipeline_disk_stop,pipeline_disk_requested;
+static int pipeline_disk_dir=-1,pipeline_disk_lock=-1,pipeline_disk_started,pipeline_disk_stop,pipeline_disk_requested,pipeline_disk_attempted;
 static uint8_t pipeline_disk_identity[32];
 static VkPhysicalDeviceProperties pipeline_disk_properties;
 static char pipeline_disk_name[80];
@@ -98,10 +98,12 @@ static void *pipeline_disk_main(void *unused) {
 // Request only at infrequent present boundaries, with one pending job; the game thread never extracts or writes cache data.
 static void pipeline_disk_poll(void) {
     if(pipeline_disk_dir<0||!presents||presents%60)return;
-    uint64_t generation=atomic_load(&pipeline_cache_generation);if(generation==atomic_load(&pipeline_cache_saved))return;
+    uint64_t generation=atomic_load(&pipeline_cache_generation),saved=atomic_load(&pipeline_cache_saved);if(generation==saved)return;
     uint64_t now=dm_android_clock_ns(CLOCK_MONOTONIC),changed=atomic_load(&pipeline_cache_changed);
     pthread_mutex_lock(&pipeline_disk_mutex);
-    if(pipeline_disk_stop||now-pipeline_disk_attempt<30000000000ull||(now-changed<3000000000ull&&now-pipeline_disk_attempt<60000000000ull)){pthread_mutex_unlock(&pipeline_disk_mutex);return;}
+    uint64_t cooldown=pipeline_disk_attempted?30000000000ull:5000000000ull;
+    if(pipeline_disk_stop||now-pipeline_disk_attempt<cooldown||(now-changed<3000000000ull&&now-pipeline_disk_attempt<60000000000ull)){pthread_mutex_unlock(&pipeline_disk_mutex);return;}
+    pipeline_disk_attempted=1;
     if(!pipeline_disk_started){int error=pthread_create(&pipeline_disk_thread,NULL,pipeline_disk_main,NULL);if(error){pipeline_disk_attempt=now;pthread_mutex_unlock(&pipeline_disk_mutex);LOG("[vulkan-pipeline-cache] worker_create_failed=%d",error);return;}pipeline_disk_started=1;}
     pipeline_disk_attempt=now;pipeline_disk_requested=1;pthread_cond_signal(&pipeline_disk_condition);pthread_mutex_unlock(&pipeline_disk_mutex);
 }
