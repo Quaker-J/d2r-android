@@ -1,6 +1,6 @@
 # Android 源码冻结说明
 
-日期：2026-10-16。按用户要求暂停性能开发，整理当前源码至私有仓库 sydeEvans/d2r-android。
+日期：2026-10-16。按用户要求暂停性能开发，整理当前源码至私有仓库 sydeEvans/d2r-android。本文描述该次快照的边界；后续进展与继续入口见 [Android 移植进度](ANDROID_PORT_PROGRESS.zh-CN.md)。
 
 ## 验证边界
 

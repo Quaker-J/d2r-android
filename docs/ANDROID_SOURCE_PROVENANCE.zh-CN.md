@@ -6,7 +6,7 @@
 
 参考仓库 `<LOCAL_WORK>/research/dodola-d2r-mobile`，remote `https://github.com/dodola/d2r-mobile.git`，实际HEAD为 `642480b7606cf4adda30bcf009eb56f87745c908`，标题 `Add Android Vulkan runtime controls and measured game A/B records`。本文行号指该固定版本。
 
-当前仓库remote为 `https://github.com/jhaizhou-ops/d2r-mobile.git`。当前Android渲染实现仍是 `dm/android/native/nvn_vulkan.c` 及其拆分include，未替换为dodola的 `dm/gfx/nvn/nvn_vk.c`。已经采用的是数项具体算法和生命周期设计，再按当前资源模型改写；“使用了百分之多少dodola代码”没有可审计的单一数字。
+本仓库源自上游 `https://github.com/jhaizhou-ops/d2r-mobile.git`（私有发布为 `sydeEvans/d2r-android`，起点为其提交 `2eb5758`）。当前Android渲染实现仍是 `dm/android/native/nvn_vulkan.c` 及其拆分include，未替换为dodola的 `dm/gfx/nvn/nvn_vk.c`。已经采用的是数项具体算法和生命周期设计，再按当前资源模型改写；“使用了百分之多少dodola代码”没有可审计的单一数字。
 
 ## 已落地：可定位的借鉴与改写
 

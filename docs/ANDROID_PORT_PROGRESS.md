@@ -1,12 +1,22 @@
 # Android port progress
 
-Updated: 2026-10-14. This file is the entry point for resuming interrupted work.
+Updated: 2026-10-16. This file is the entry point for resuming interrupted work.
 
 中文：[ANDROID_PORT_PROGRESS.zh-CN.md](ANDROID_PORT_PROGRESS.zh-CN.md)
 
 ## Current state (read first when resuming)
 
-The real Android app now completes Chinese class selection and native text entry, and the independent test character `AndroidProbe` actually enters Act I camp (area 1). Actual screenshot: `dm/android/build/device-first-town.png`. Real saves exist under private `files/save/AndroidProbe/`. Camp runs at roughly 2 FPS with incorrect dark 3D lighting; complete controls and sustained gameplay are unverified. Game Activity: `org.d2r.android.port/.D2RActivity`; latest debug port: `<设备地址>`. All changes remain uncommitted, with game code/assets/caches ignored. Later sections are chronological history; use the latest section at the end.
+The Android port enters Act I camp and moves; the stable phase approaches 60 FPS, while first-time pipeline compilation still causes hitches and full-scene stable 60 FPS is not reached yet. Detection, build and install evidence: `~/dm-work/research/android-latest-891f596/`.
+
+- Private repository: [sydeEvans/d2r-android](https://github.com/sydeEvans/d2r-android). The upstream license and attribution are kept; no game assets, keys or APKs.
+- Latest pulled, built and installed commit: `891f596172042a7d2db702e66fb425ca0b6d6102` (branch `main`, "Reduce Android Vulkan frame-time overhead").
+- Main working directory: `~/d2r` (moved back from `~/dm-work/publish/d2r-android` on 2026-10-16; the earlier development site is archived at `~/dm-work/archive/d2r-old-site-20261016`). Source lives only in `~/d2r`; `~/dm-work` holds tools, resources and run artifacts only. Confirm directory and branch before continuing.
+- Implemented: Vulkan rendering, AAudio sound, virtual stick and buttons, system keyboard name entry, landscape and display fit, FPS and CPU/GPU overlay.
+- Observed on the tablet (OPPO OPD2409): stationary camp screenshot 60.0 FPS (CPU 7.7 ms, GPU 7.4 ms; two consecutive 120-frame windows with no frame over 33 ms); camp movement screenshot 58.2 FPS, ten 60-frame windows at 59.38-60.69 FPS. One first-time pipeline compile took 111.987 ms (frame 109872); another 91.010 ms long frame is not yet explained.
+- Rebuildability (verified 2026-10-16): a fresh clone at `891f596` rebuilt end to end via `docs/ANDROID_BUILD.md`; the three generated tables and the rewritten `libdmguest_main/sdk/subsdk0.so` are byte-identical to the existing artifacts, and the production APK builds successfully (about 4 min 47 s). Evidence: `~/dm-work/research/android-repro-verify/`.
+- Next steps: reduce first-time pipeline compile hitches (saved pipeline descriptions / load-stage prewarm), observe movement, new areas and combat frame intervals, deploy the same commit to the second phone, and keep this file current.
+
+The Chinese file is the authoritative per-round record; the sections below are older English notes and history that are not maintained.
 
 ## Objective and user decisions
 

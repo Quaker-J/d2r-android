@@ -6,7 +6,7 @@
 
 平台：iPhone / iPad（iOS 26 起）· Mac（Apple 芯片，macOS 26 及以上，第一版）· 游戏版本：Switch 版「术士君临」1.0.34.0（对应 PC 版 3.3.94012）· 中文 / English · 许可证：MIT · **需要自备游戏文件**
 
-English: [README.md](README.md)
+English: [README.md](UPSTREAM_README.md)
 
 <p align="center">
   <img src="https://github.com/jhaizhou-ops/d2r-mobile/releases/download/assets/hero_zh.jpg" width="100%" alt="iPhone 上全面屏铺满的游戏画面：地狱难度的哈洛加斯，红门通往秘境">
@@ -31,7 +31,7 @@ English: [README.md](README.md)
 **不是：**
 
 - 不是模拟器，也不是云游戏或串流。
-- **不含、也不分发任何游戏内容。** 仓库里没有游戏程序、美术、文字、数据表或着色器，这些都在你自己的机器上、用你自己的文件现做出来（见 [docs/GAME_FILES.zh-CN.md](docs/GAME_FILES.zh-CN.md)）。仓库里带着的是我们为适配而记录的接口信息——着色器的接口描述、图形接口的函数表、程序内的地址等——逐项列在 [docs/DERIVED.zh-CN.md](docs/DERIVED.zh-CN.md)。
+- **不含、也不分发任何游戏内容。** 仓库里没有游戏程序、美术、文字、数据表或着色器，这些都在你自己的机器上、用你自己的文件现做出来（见 [docs/GAME_FILES.zh-CN.md](GAME_FILES.zh-CN.md)）。仓库里带着的是我们为适配而记录的接口信息——着色器的接口描述、图形接口的函数表、程序内的地址等——逐项列在 [docs/DERIVED.zh-CN.md](DERIVED.zh-CN.md)。
 - 不支持联机，游戏完全离线运行，不需要任何联网账号。
 
 ## 经过实战检验
@@ -73,7 +73,7 @@ iPhone 与 iPad 共用一个安装包。
 
 安装包只有一百多 MB；游戏资源（约 5.6 GB）单独放进手机，升级 App 时存档和资源都不动。
 
-之所以能这么快：程序是原生执行的，没有一条指令经过模拟；图形直接走 Metal；着色器全部离线翻译、预先编好，进新场景不用现编。旧机型（A16 及更早，如 iPhone 14 系列、iPhone 15）不支持游戏原本的贴图压缩格式，要用你自己的游戏文件另做一份贴图包，同样满帧——做法见 [docs/LEGACY_DEVICES.zh-CN.md](docs/LEGACY_DEVICES.zh-CN.md)。
+之所以能这么快：程序是原生执行的，没有一条指令经过模拟；图形直接走 Metal；着色器全部离线翻译、预先编好，进新场景不用现编。旧机型（A16 及更早，如 iPhone 14 系列、iPhone 15）不支持游戏原本的贴图压缩格式，要用你自己的游戏文件另做一份贴图包，同样满帧——做法见 [docs/LEGACY_DEVICES.zh-CN.md](LEGACY_DEVICES.zh-CN.md)。
 
 ## 为手指重新设计
 
@@ -187,11 +187,11 @@ flowchart LR
 | iOS App | `dm/ios` | App 外壳、触摸操作与界面 |
 | 验证 | `dm/verify` | 核对改写后的代码与原版行为完全一致，以及每次改动都要过的回归闸门 |
 
-**为什么可信：** 稳定不是靠运气。测试与验证工具是项目的一部分——宿主与图形层的单元测试、对每一处改写指令的等价核对、触摸界面的脚本化走查回归、真机冒烟。从 `make -C dm/host/tests run`、`make -C dm/gfx/tests run` 与 `dm/verify/regress.sh` 开始（都在下面第 2 步准备的 Python 环境里跑；`regress.sh` 另需 `brew install llvm`）。怎么参与见 [CONTRIBUTING.zh-CN.md](CONTRIBUTING.zh-CN.md)。
+**为什么可信：** 稳定不是靠运气。测试与验证工具是项目的一部分——宿主与图形层的单元测试、对每一处改写指令的等价核对、触摸界面的脚本化走查回归、真机冒烟。从 `make -C dm/host/tests run`、`make -C dm/gfx/tests run` 与 `dm/verify/regress.sh` 开始（都在下面第 2 步准备的 Python 环境里跑；`regress.sh` 另需 `brew install llvm`）。怎么参与见 [CONTRIBUTING.zh-CN.md](../CONTRIBUTING.zh-CN.md)。
 
 ## 开始使用
 
-两条路都要先有**你自己购买的游戏的文件**：Switch 版《暗黑破坏神 II：狱火重生》本体加「术士君临」资料片，更新到 1.0.34.0（主机上显示的版本号；它对应 PC 版的 3.3.94012，本仓库的目录名和工具里用的是后一个号）。本项目是按带这部资料片的版本做的，没有资料片的情况不支持、也没有验过。怎么准备见 [docs/GAME_FILES.zh-CN.md](docs/GAME_FILES.zh-CN.md)。
+两条路都要先有**你自己购买的游戏的文件**：Switch 版《暗黑破坏神 II：狱火重生》本体加「术士君临」资料片，更新到 1.0.34.0（主机上显示的版本号；它对应 PC 版的 3.3.94012，本仓库的目录名和工具里用的是后一个号）。本项目是按带这部资料片的版本做的，没有资料片的情况不支持、也没有验过。怎么准备见 [docs/GAME_FILES.zh-CN.md](GAME_FILES.zh-CN.md)。
 
 本项目基于 Switch 版 1.0.34.0（对应 PC 版的 3.3.94012）实现并验证，工具默认只认这一版。已有社区用户反馈，参照仓库结构自行适配了其他版本并成功运行。规则表按游戏版本分组存放（`dm/tools/patch_nso.py` 里按主程序的构建标识分组），欢迎把你适配的版本提交回来。
 
@@ -200,9 +200,9 @@ flowchart LR
 | 电脑 | Apple 芯片的 Mac，装好 Xcode | Windows / Linux / 没装 Xcode 的 Mac |
 | 做法 | 从源码完整构建 | 下载不含游戏内容的「壳」，用工具把你的游戏内容做进去，再用自签工具装机 |
 | 现状 | 主路，上面的一切都出自它 | Windows 上从做包到真机游玩整条走通，两个系统做出的游戏程序逐字节相同；只剩用自签工具签名这一步等你来反馈 |
-| 说明 | 下面三步 | [docs/NO_XCODE.zh-CN.md](docs/NO_XCODE.zh-CN.md) |
+| 说明 | 下面三步 | [docs/NO_XCODE.zh-CN.md](NO_XCODE.zh-CN.md) |
 
-签名用的 Apple 账号：付费的开发者账号功能最全；免费的 Apple ID 也可以（没有 iCloud 存档同步，每 7 天要重新签名重装）。完整的依赖清单见 [docs/DEPENDENCIES.zh-CN.md](docs/DEPENDENCIES.zh-CN.md)。
+签名用的 Apple 账号：付费的开发者账号功能最全；免费的 Apple ID 也可以（没有 iCloud 存档同步，每 7 天要重新签名重装）。完整的依赖清单见 [docs/DEPENDENCIES.zh-CN.md](DEPENDENCIES.zh-CN.md)。
 
 ### 有 Mac：三步
 
@@ -227,7 +227,7 @@ flowchart LR
    cd dm/ios && ./run.sh build    # 缺省同时面向 iPhone 与 iPad；只要 iPhone：DM_DEVICE_FAMILY=1 ./run.sh build
    ```
 
-装到手机上第一次打开，App 会要「游戏资源文件夹」——就是游戏文件里的 18 个资源档案，怎么放见 [docs/GAME_FILES.zh-CN.md](docs/GAME_FILES.zh-CN.md) 的「手机上要放的那个游戏资源文件夹」一节。
+装到手机上第一次打开，App 会要「游戏资源文件夹」——就是游戏文件里的 18 个资源档案，怎么放见 [docs/GAME_FILES.zh-CN.md](GAME_FILES.zh-CN.md) 的「手机上要放的那个游戏资源文件夹」一节。
 
 `./setup.sh check` 是体检：逐项报告这台电脑、工具、游戏文件、签名配置的状态，缺的每一项都给出去哪拿和下一步命令，不做任何改动。手上是一整个游戏包（`.xci` / `.nsp`）时，`./setup.sh <游戏包> <prod.keys>` 会先把游戏文件取出来放到位再接着准备（要先装 hactool）。每次更新到新的提交之后都要再跑一遍 `./setup.sh`：它会按当前源码重出改写产物与着色器库（已是最新的步骤会跳过）。它还会改写仓库里三个随工具指纹变化的文件（`dm/gfx/tools/dmsh_chain.lock`、`dm/gfx/nvn/dmsh_chain.h`、`dm/gfx/nvn/c1_full.tsv`），这是预期的，不要提交它们。
 
@@ -240,11 +240,11 @@ source ~/dm-work/build/cache/dm/venv/bin/activate
 dm/tools/mac_app.sh        # 产出 ~/dm-work/out/macapp/D2R Mobile.app
 ```
 
-这是第一版：界面用原版的手柄版界面，键盘对应整套手柄键位。它还没有人真的坐下来玩过——键位、已知的不足和第一次打开时要做的事，见 [docs/MAC.zh-CN.md](docs/MAC.zh-CN.md)。
+这是第一版：界面用原版的手柄版界面，键盘对应整套手柄键位。它还没有人真的坐下来玩过——键位、已知的不足和第一次打开时要做的事，见 [docs/MAC.zh-CN.md](MAC.zh-CN.md)。
 
 ### 没有 Mac：壳 + 做包工具
 
-从本仓库的[发布页](https://github.com/jhaizhou-ops/d2r-mobile/releases)下载我们预先做好的、不含游戏内容的「壳」安装包（`D2RMobile-shell.ipa`），加上你自己的游戏文件，在 Windows 或 Linux 上做出安装包，再用自签工具签名装机。只有走这条路时，因为做包的电脑上没有苹果的着色器编译器，手机**第一次启动**要花约 7 分钟把着色器编完（一次性，带进度条）；用 Xcode 构建的包没有这一步。步骤与每一步的验证现状见 [docs/NO_XCODE.zh-CN.md](docs/NO_XCODE.zh-CN.md)。
+从本仓库的[发布页](https://github.com/jhaizhou-ops/d2r-mobile/releases)下载我们预先做好的、不含游戏内容的「壳」安装包（`D2RMobile-shell.ipa`），加上你自己的游戏文件，在 Windows 或 Linux 上做出安装包，再用自签工具签名装机。只有走这条路时，因为做包的电脑上没有苹果的着色器编译器，手机**第一次启动**要花约 7 分钟把着色器编完（一次性，带进度条）；用 Xcode 构建的包没有这一步。步骤与每一步的验证现状见 [docs/NO_XCODE.zh-CN.md](NO_XCODE.zh-CN.md)。
 
 ## 已知限制
 
@@ -254,7 +254,7 @@ dm/tools/mac_app.sh        # 产出 ~/dm-work/out/macapp/D2R Mobile.app
 | `.nsp` / `.xci` 两种游戏包 | 工具只核对主程序的版本，不区分包的格式；我们自己用 `.xci` 走过全程，有网友反馈 `.nsp` 格式的游戏包也完美兼容 |
 | 用自签工具（Sideloadly、AltStore 等）签名装机 | 没验过，欢迎开 Issue 告诉我们结果 |
 | Linux 上做包 | 没验过（Windows 与 Mac 上验过） |
-| A16 及更早的机型（iPhone 14 系列、iPhone 15 / 15 Plus 等） | 可以玩，要多做一份老机型贴图包并带着它构建 App：[docs/LEGACY_DEVICES.zh-CN.md](docs/LEGACY_DEVICES.zh-CN.md)。App 提示「暂不支持本机型」就是缺这一步 |
+| A16 及更早的机型（iPhone 14 系列、iPhone 15 / 15 Plus 等） | 可以玩，要多做一份老机型贴图包并带着它构建 App：[docs/LEGACY_DEVICES.zh-CN.md](LEGACY_DEVICES.zh-CN.md)。App 提示「暂不支持本机型」就是缺这一步 |
 | 物品注释里的「一句点评」与「旧译名对照」 | 两张内容表不随仓库提供，可自备，见 `dm/ios/tools/annot/README.zh-CN.md` |
 
 ## 参与与反馈
@@ -269,16 +269,16 @@ dm/tools/mac_app.sh        # 产出 ~/dm-work/out/macapp/D2R Mobile.app
 
 | 说明 | 讲什么 |
 |---|---|
-| [dm/README.zh-CN.md](dm/README.zh-CN.md) | 整套东西怎么工作、目录、常用命令、宿主各文件 |
-| [dm/gfx/README.zh-CN.md](dm/gfx/README.zh-CN.md) | 图形层与着色器翻译链 |
-| [dm/ios/README.zh-CN.md](dm/ios/README.zh-CN.md) | iOS 外壳、出包与冒烟 |
-| [dm/verify/README.zh-CN.md](dm/verify/README.zh-CN.md) | 验证工具各自验什么、需要什么前提 |
-| [docs/GAME_FILES.zh-CN.md](docs/GAME_FILES.zh-CN.md) | 游戏文件：要哪些、怎么从自己的主机取、放到哪 |
-| [docs/DEPENDENCIES.zh-CN.md](docs/DEPENDENCIES.zh-CN.md) | 依赖清单与第三方许可证 |
-| [docs/NO_XCODE.zh-CN.md](docs/NO_XCODE.zh-CN.md) | 不用 Xcode、不用 Mac 的做法 |
-| [docs/MAC.zh-CN.md](docs/MAC.zh-CN.md) | 在 Mac 上玩：构建 macOS App、键位、已知不足 |
-| [docs/LEGACY_DEVICES.zh-CN.md](docs/LEGACY_DEVICES.zh-CN.md) | 老机型（A16 及更早）：怎么做贴图包、怎么放进手机 |
-| [docs/DERIVED.zh-CN.md](docs/DERIVED.zh-CN.md) | 仓库里与游戏有关的东西：有什么、没有什么、为什么 |
+| [dm/README.zh-CN.md](../dm/README.zh-CN.md) | 整套东西怎么工作、目录、常用命令、宿主各文件 |
+| [dm/gfx/README.zh-CN.md](../dm/gfx/README.zh-CN.md) | 图形层与着色器翻译链 |
+| [dm/ios/README.zh-CN.md](../dm/ios/README.zh-CN.md) | iOS 外壳、出包与冒烟 |
+| [dm/verify/README.zh-CN.md](../dm/verify/README.zh-CN.md) | 验证工具各自验什么、需要什么前提 |
+| [docs/GAME_FILES.zh-CN.md](GAME_FILES.zh-CN.md) | 游戏文件：要哪些、怎么从自己的主机取、放到哪 |
+| [docs/DEPENDENCIES.zh-CN.md](DEPENDENCIES.zh-CN.md) | 依赖清单与第三方许可证 |
+| [docs/NO_XCODE.zh-CN.md](NO_XCODE.zh-CN.md) | 不用 Xcode、不用 Mac 的做法 |
+| [docs/MAC.zh-CN.md](MAC.zh-CN.md) | 在 Mac 上玩：构建 macOS App、键位、已知不足 |
+| [docs/LEGACY_DEVICES.zh-CN.md](LEGACY_DEVICES.zh-CN.md) | 老机型（A16 及更早）：怎么做贴图包、怎么放进手机 |
+| [docs/DERIVED.zh-CN.md](DERIVED.zh-CN.md) | 仓库里与游戏有关的东西：有什么、没有什么、为什么 |
 
 ## 声明
 
@@ -286,4 +286,4 @@ dm/tools/mac_app.sh        # 产出 ~/dm-work/out/macapp/D2R Mobile.app
 
 ## 许可证
 
-MIT，见 [LICENSE](LICENSE)。第三方代码各自的许可证在其目录内，见 [docs/DEPENDENCIES.zh-CN.md](docs/DEPENDENCIES.zh-CN.md)。
+MIT，见 [LICENSE](../LICENSE)。第三方代码各自的许可证在其目录内，见 [docs/DEPENDENCIES.zh-CN.md](DEPENDENCIES.zh-CN.md)。

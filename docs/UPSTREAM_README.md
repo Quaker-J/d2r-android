@@ -6,7 +6,7 @@ This is not a tech demo that "sort of runs". It is a mobile version polished for
 
 Platforms: iPhone / iPad (iOS 26 and later) · Mac (Apple silicon, macOS 26 or later, first version) · Game version: Switch release with Reign of the Warlock, 1.0.34.0 (corresponds to PC version 3.3.94012) · English / 中文 · License: MIT · **Bring your own game files**
 
-中文: [README.zh-CN.md](README.zh-CN.md)
+中文: [README.zh-CN.md](UPSTREAM_README.zh-CN.md)
 
 <p align="center">
   <img src="https://github.com/jhaizhou-ops/d2r-mobile/releases/download/assets/hero_en.jpg" width="100%" alt="The game filling the whole edge-to-edge screen of an iPhone: Harrogath on Hell, with the red portal to the Greater Rift">
@@ -31,7 +31,7 @@ Platforms: iPhone / iPad (iOS 26 and later) · Mac (Apple silicon, macOS 26 or l
 **It is not:**
 
 - An emulator, cloud gaming, or streaming.
-- **A source of game content. It contains none and distributes none.** There is no game program, art, text, data table or shader in this repository; all of that is generated on your own machine from your own files (see [docs/GAME_FILES.md](docs/GAME_FILES.md)). What the repository does carry is the interface information we recorded to make the port work — shader interface descriptions, the graphics API function table, addresses inside the program and the like — listed item by item in [docs/DERIVED.md](docs/DERIVED.md).
+- **A source of game content. It contains none and distributes none.** There is no game program, art, text, data table or shader in this repository; all of that is generated on your own machine from your own files (see [docs/GAME_FILES.md](GAME_FILES.md)). What the repository does carry is the interface information we recorded to make the port work — shader interface descriptions, the graphics API function table, addresses inside the program and the like — listed item by item in [docs/DERIVED.md](DERIVED.md).
 - Online. There is no multiplayer; the game runs fully offline and needs no online account.
 
 ## Battle-tested
@@ -73,7 +73,7 @@ Measured on a real device (iPhone 17 Pro Max):
 
 The install package is only a little over 100 MB. The game resources (about 5.6 GB) are placed on the phone separately, and updating the app touches neither your saves nor the resources.
 
-Why it is this fast: the program executes natively, and not a single instruction goes through emulation; graphics go straight to Metal; every shader is translated offline and compiled ahead of time, so nothing is compiled when you enter a new scene. Older chips (A16 and earlier, such as the iPhone 14 family and iPhone 15) do not support the game's original compressed texture format; they need an extra texture pack made from your own game files, and then run at full frame rate too — see [docs/LEGACY_DEVICES.md](docs/LEGACY_DEVICES.md).
+Why it is this fast: the program executes natively, and not a single instruction goes through emulation; graphics go straight to Metal; every shader is translated offline and compiled ahead of time, so nothing is compiled when you enter a new scene. Older chips (A16 and earlier, such as the iPhone 14 family and iPhone 15) do not support the game's original compressed texture format; they need an extra texture pack made from your own game files, and then run at full frame rate too — see [docs/LEGACY_DEVICES.md](LEGACY_DEVICES.md).
 
 ## Redesigned for fingers
 
@@ -187,11 +187,11 @@ flowchart LR
 | iOS app | `dm/ios` | The app shell, touch controls and interface |
 | Verification | `dm/verify` | Checks that the rewritten code behaves exactly like the original, plus the regression gates every change goes through |
 
-**Why you can trust it:** the stability is not luck. The test and verification tooling is part of the project — unit tests for the host and graphics layers, an equivalence check for every rewritten instruction, scripted walkthrough regression for the touch interface, and on-device smoke tests. Start with `make -C dm/host/tests run`, `make -C dm/gfx/tests run` and `dm/verify/regress.sh` (run them inside the Python environment prepared in step 2 below; `regress.sh` also needs `brew install llvm`). How to contribute is in [CONTRIBUTING.md](CONTRIBUTING.md).
+**Why you can trust it:** the stability is not luck. The test and verification tooling is part of the project — unit tests for the host and graphics layers, an equivalence check for every rewritten instruction, scripted walkthrough regression for the touch interface, and on-device smoke tests. Start with `make -C dm/host/tests run`, `make -C dm/gfx/tests run` and `dm/verify/regress.sh` (run them inside the Python environment prepared in step 2 below; `regress.sh` also needs `brew install llvm`). How to contribute is in [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## Getting started
 
-Both routes start with **the files of the game you bought**: the Switch release of Diablo II: Resurrected plus the Reign of the Warlock expansion, updated to 1.0.34.0 (the version the console shows; it corresponds to PC version 3.3.94012, and the directory names and tools in this repository use the latter number). This project is built for the version with that expansion; using it without the expansion is not supported and has not been verified. How to prepare them is in [docs/GAME_FILES.md](docs/GAME_FILES.md).
+Both routes start with **the files of the game you bought**: the Switch release of Diablo II: Resurrected plus the Reign of the Warlock expansion, updated to 1.0.34.0 (the version the console shows; it corresponds to PC version 3.3.94012, and the directory names and tools in this repository use the latter number). This project is built for the version with that expansion; using it without the expansion is not supported and has not been verified. How to prepare them is in [docs/GAME_FILES.md](GAME_FILES.md).
 
 This project is implemented and verified on the Switch release 1.0.34.0 (which corresponds to PC version 3.3.94012), and by default the tools accept only that version. Community users have reported adapting other versions on their own by following the structure of this repository, and running them successfully. The rule tables are grouped by game version (in `dm/tools/patch_nso.py`, keyed by the build ID of the main program); you are welcome to contribute the version you adapted.
 
@@ -200,9 +200,9 @@ This project is implemented and verified on the Switch release 1.0.34.0 (which c
 | Computer | An Apple silicon Mac with Xcode installed | Windows / Linux / a Mac without Xcode |
 | Method | A full build from source | Download a "shell" with no game content, use the packaging tool to add your own game content, then install it with a sideloading tool |
 | Status | The main route; everything above comes from it | Works end to end on Windows, from making the package to playing on a device, and the game program produced on the two systems is byte-for-byte identical; the one step nobody has tried yet is signing with a sideloading tool — try it and tell us |
-| Instructions | The three steps below | [docs/NO_XCODE.md](docs/NO_XCODE.md) |
+| Instructions | The three steps below | [docs/NO_XCODE.md](NO_XCODE.md) |
 
-The Apple account used for signing: a paid developer account gives you everything; a free Apple ID works too (no iCloud save sync, and the app has to be re-signed and reinstalled every 7 days). The full list of dependencies is in [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md).
+The Apple account used for signing: a paid developer account gives you everything; a free Apple ID works too (no iCloud save sync, and the app has to be re-signed and reinstalled every 7 days). The full list of dependencies is in [docs/DEPENDENCIES.md](DEPENDENCIES.md).
 
 ### With a Mac: three steps
 
@@ -227,7 +227,7 @@ The Apple account used for signing: a paid developer account gives you everythin
    cd dm/ios && ./run.sh build    # targets both iPhone and iPad by default; for iPhone only: DM_DEVICE_FAMILY=1 ./run.sh build
    ```
 
-The first time you open the app on your phone, it asks for the "game resource folder" — the 18 resource archives from your game files. Where to put them is in the section "The "game resource folder" that goes on the phone" of [docs/GAME_FILES.md](docs/GAME_FILES.md).
+The first time you open the app on your phone, it asks for the "game resource folder" — the 18 resource archives from your game files. Where to put them is in the section "The "game resource folder" that goes on the phone" of [docs/GAME_FILES.md](GAME_FILES.md).
 
 `./setup.sh check` is a health check: it reports the state of this computer, the tools, the game files and the signing configuration item by item, and for everything missing it says where to get it and which command to run next; it changes nothing. If what you have is a whole game package (`.xci` / `.nsp`), `./setup.sh <game package> <prod.keys>` first extracts the game files into place and then carries on (install hactool first). Run `./setup.sh` again after every update to a new commit: it rebuilds the patched binaries and the shader library for the current sources (steps that are already up to date are skipped). It also rewrites three files in the repository that change with your local tool fingerprints (`dm/gfx/tools/dmsh_chain.lock`, `dm/gfx/nvn/dmsh_chain.h`, `dm/gfx/nvn/c1_full.tsv`); that is expected, do not commit them.
 
@@ -240,11 +240,11 @@ source ~/dm-work/build/cache/dm/venv/bin/activate
 dm/tools/mac_app.sh        # produces ~/dm-work/out/macapp/D2R Mobile.app
 ```
 
-This is a first version: it uses the original gamepad UI, with the keyboard mapped to the full set of gamepad buttons. Nobody has actually sat down and played it yet — the key mapping, the known gaps and what to do on first launch are in [docs/MAC.md](docs/MAC.md).
+This is a first version: it uses the original gamepad UI, with the keyboard mapped to the full set of gamepad buttons. Nobody has actually sat down and played it yet — the key mapping, the known gaps and what to do on first launch are in [docs/MAC.md](MAC.md).
 
 ### Without a Mac: the shell plus the packaging tool
 
-Download our prebuilt "shell" package (`D2RMobile-shell.ipa`), which contains no game content, from this repository's [Releases page](https://github.com/jhaizhou-ops/d2r-mobile/releases), add your own game files, make the install package on Windows or Linux, then sign and install it with a sideloading tool. On this route only, because the computer making the package has no Apple shader compiler, the **first launch** on the phone spends about 7 minutes compiling shaders (once, with a progress bar); a package built with Xcode has no such step. The steps, and how far each one has been verified, are in [docs/NO_XCODE.md](docs/NO_XCODE.md).
+Download our prebuilt "shell" package (`D2RMobile-shell.ipa`), which contains no game content, from this repository's [Releases page](https://github.com/jhaizhou-ops/d2r-mobile/releases), add your own game files, make the install package on Windows or Linux, then sign and install it with a sideloading tool. On this route only, because the computer making the package has no Apple shader compiler, the **first launch** on the phone spends about 7 minutes compiling shaders (once, with a progress bar); a package built with Xcode has no such step. The steps, and how far each one has been verified, are in [docs/NO_XCODE.md](NO_XCODE.md).
 
 ## Known limitations
 
@@ -254,7 +254,7 @@ Download our prebuilt "shell" package (`D2RMobile-shell.ipa`), which contains no
 | `.nsp` / `.xci` game packages | The tools only check the version of the main program and do not distinguish package formats; we ran the whole path with an `.xci` ourselves, and users have reported that `.nsp` packages work perfectly as well |
 | Signing and installing with a sideloading tool (Sideloadly, AltStore and the like) | Not verified; open an issue and tell us how it went |
 | Making the package on Linux | Not verified (verified on Windows and Mac) |
-| A16 and earlier devices (iPhone 14 family, iPhone 15 / 15 Plus and so on) | Playable; they need a Legacy Device Pack and an App built with it: [docs/LEGACY_DEVICES.md](docs/LEGACY_DEVICES.md). "Device Not Supported" in the App means this step is missing |
+| A16 and earlier devices (iPhone 14 family, iPhone 15 / 15 Plus and so on) | Playable; they need a Legacy Device Pack and an App built with it: [docs/LEGACY_DEVICES.md](LEGACY_DEVICES.md). "Device Not Supported" in the App means this step is missing |
 | The "one-line verdict" and "legacy Chinese name" entries in item notes | These two content tables are not shipped with the repository; you can supply your own, see `dm/ios/tools/annot/README.md` |
 
 ## Contributing and feedback
@@ -269,16 +269,16 @@ Download our prebuilt "shell" package (`D2RMobile-shell.ipa`), which contains no
 
 | Document | Covers |
 |---|---|
-| [dm/README.md](dm/README.md) | How the whole thing works, directory layout, common commands, the host's source files |
-| [dm/gfx/README.md](dm/gfx/README.md) | The graphics layer and the shader translation chain |
-| [dm/ios/README.md](dm/ios/README.md) | The iOS shell, building and smoke testing |
-| [dm/verify/README.md](dm/verify/README.md) | What each verification tool checks and what it needs |
-| [docs/GAME_FILES.md](docs/GAME_FILES.md) | Game files: which ones you need, how to get them from your own console, where to put them |
-| [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) | Dependencies and third-party licenses |
-| [docs/NO_XCODE.md](docs/NO_XCODE.md) | Building without Xcode and without a Mac |
-| [docs/MAC.md](docs/MAC.md) | Playing on a Mac: building the macOS App, key mapping, known gaps |
-| [docs/LEGACY_DEVICES.md](docs/LEGACY_DEVICES.md) | Older devices (A16 and earlier): making the texture pack and putting it on the phone |
-| [docs/DERIVED.md](docs/DERIVED.md) | Game-related material in this repository: what is here, what is not, and why |
+| [dm/README.md](../dm/README.md) | How the whole thing works, directory layout, common commands, the host's source files |
+| [dm/gfx/README.md](../dm/gfx/README.md) | The graphics layer and the shader translation chain |
+| [dm/ios/README.md](../dm/ios/README.md) | The iOS shell, building and smoke testing |
+| [dm/verify/README.md](../dm/verify/README.md) | What each verification tool checks and what it needs |
+| [docs/GAME_FILES.md](GAME_FILES.md) | Game files: which ones you need, how to get them from your own console, where to put them |
+| [docs/DEPENDENCIES.md](DEPENDENCIES.md) | Dependencies and third-party licenses |
+| [docs/NO_XCODE.md](NO_XCODE.md) | Building without Xcode and without a Mac |
+| [docs/MAC.md](MAC.md) | Playing on a Mac: building the macOS App, key mapping, known gaps |
+| [docs/LEGACY_DEVICES.md](LEGACY_DEVICES.md) | Older devices (A16 and earlier): making the texture pack and putting it on the phone |
+| [docs/DERIVED.md](DERIVED.md) | Game-related material in this repository: what is here, what is not, and why |
 
 ## Legal
 
@@ -286,4 +286,4 @@ Download our prebuilt "shell" package (`D2RMobile-shell.ipa`), which contains no
 
 ## License
 
-MIT, see [LICENSE](LICENSE). Third-party code keeps its own license in its own directory; see [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md).
+MIT, see [LICENSE](../LICENSE). Third-party code keeps its own license in its own directory; see [docs/DEPENDENCIES.md](DEPENDENCIES.md).
