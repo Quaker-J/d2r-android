@@ -355,8 +355,13 @@ dmAndroidLaunchOverlayNote	关闭后游戏中不显示浮层；按住不影响�
 dmAndroidLaunchProfile	画面档位	Graphics profile	Android 启动界面
 dmAndroidLaunchHandheld	掌机 1280×720	Handheld 1280×720	Android 启动界面
 dmAndroidLaunchConsole	主机 1600×900	Docked 1600×900	Android 启动界面
-dmAndroidLaunchGameFiles	游戏文件	Game files	Android 启动界面
-dmAndroidLaunchKeys	密钥文件	Key file	Android 启动界面
 dmAndroidLaunchNotSet	未设置	Not set	Android 启动界面
 dmAndroidLaunchStart	启动游戏	Start game	Android 启动界面
-dmAndroidLaunchPending	游戏文件与密钥的解析尚未接入，当前使用应用内已有的数据启动	Parsing game files and keys is not wired up yet; this starts with the data already inside the app	Android 启动界面
+dmAndroidLaunchImport	导入数据包	Import package	Android 启动界面
+dmAndroidLaunchImported	已导入：%s	Imported: %s	Android 启动界面
+dmAndroidLaunchImporting	正在导入 %d%%	Importing %d%%	Android 启动界面
+dmAndroidLaunchImportSummary	%d 个资源、%d 个着色器	%d assets, %d shaders	Android 启动界面
+dmAndroidLaunchImportFailed	导入失败：%s	Import failed: %s	Android 启动界面
+dmAndroidLaunchCancel	正在取消…	Cancelling…	Android 启动界面
+dmAndroidLaunchNeedsImport	还没有数据包，请先导入再启动游戏	No package yet; import one before starting the game	Android 启动界面
+dmAndroidLaunchPending	数据包由电脑端生成（见 docs/ANDROID_PACKAGE.zh-CN.md），导入后即可启动	The package is produced on a PC (see docs/ANDROID_PACKAGE.zh-CN.md); import it to start	Android 启动界面

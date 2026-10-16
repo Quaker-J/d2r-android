@@ -305,7 +305,15 @@ void loader_hash_log(void) {
 // Guest code comes from APK ELF libraries; only data and key pages are writable.
 static void map_image(module_t *m, const char *dir) {
     char library[1024], layout[1024], error[512];
-    snprintf(library, sizeof library, "%s/libdmguest_%s.so", getenv("DM_ANDROID_LIBDIR") ? getenv("DM_ANDROID_LIBDIR") : dir, m->name);
+    // 客体模块目录：导入的数据包优先（DM_GUEST_LIBDIR），否则用 APK 库目录。
+    // 不能改成重指 DM_ANDROID_LIBDIR —— 图形驱动拿它找自己的 hook 库，那里必须留在 APK 库目录。
+    // Guest module directory: an imported package wins (DM_GUEST_LIBDIR), else the APK library directory.
+    // DM_ANDROID_LIBDIR cannot be repointed instead, because the graphics driver uses it to find its own hook
+    // libraries, which have to stay in the APK's library directory.
+    const char *library_dir = getenv("DM_GUEST_LIBDIR");
+    if (!library_dir || !*library_dir) library_dir = getenv("DM_ANDROID_LIBDIR");
+    if (!library_dir || !*library_dir) library_dir = dir;
+    snprintf(library, sizeof library, "%s/libdmguest_%s.so", library_dir, m->name);
     snprintf(layout, sizeof layout, "%s/%s.fixups.tsv", dir, m->name);
     dm_android_module image;
     if (dm_android_load(&image, library, layout, error, sizeof error)) die("%s", error);

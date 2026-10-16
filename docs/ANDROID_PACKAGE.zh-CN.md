@@ -50,16 +50,24 @@ d2r-package.zip
 
 ## 手机端怎么用它
 
-导入后解到应用外部私有目录：
+导入时**按大小分开落盘**，因为两边的限制不同：
 
 ```
-/sdcard/Android/data/org.d2r.android.port/files/d2r-package/
-    game/  romfs/  shaders/  manifest.json
+内部目录（可执行）  <internalDataPath>/d2r-package/game/          模块与加载布局，约 80 MB
+外部目录（大容量）  <externalDataPath>/d2r-package/romfs/         游戏资源，约 8.4 GB
+                    <externalDataPath>/d2r-package/shaders/       翻译后的着色器，约 0.5 GB
+                    <externalDataPath>/d2r-package/manifest.json  完成标记
 ```
 
-启动时如果这个目录里有 `manifest.json`，就用它里面的三份数据，否则回落到 APK 自带与手工推送的默认位置。这样"导入过"和"没导入过"两条路都成立，且**不需要在配置里写任意路径**（现有配置解析器的键白名单与"不接受任意路径"的设计保持不变）。
+**为什么必须分开**：外部存储是 `noexec` 挂载（实测 `/storage/emulated` 带 `noexec`），从那里 `dlopen` 会失败；
+而模块必须以动态库形式装入。内部存储没有这个限制 —— 图形驱动就是从 `files/temp/driver/` 加载的，那是已验证的路径。
+反过来，内部数据目录放不下 8.4 GB 的资源，所以大数据走外部。
 
-汇编后的模块从 `d2r-package/game/` 直接 `dlopen`：应用从自己的私有目录加载 .so 在这台设备上已被证实可行（图形驱动就是从 `files/temp/driver/` 加载的）。
+启动时如果外部目录里有 `manifest.json`，就用它指向的这三份数据，否则回落到 APK 自带与手工推送的默认位置。
+这样"导入过"和"没导入过"两条路都成立，且**不需要在配置里写任意路径**（现有配置解析器的键白名单与"不接受任意路径"的设计保持不变）。
+
+**导入是原子的**：旧的 `manifest.json` 先删、新的最后才写。中途失败（空间不足、取消、zip 损坏）留下的是一个
+没有 manifest 的目录，游戏会回落到默认数据，而不是读到半个包。
 
 ## 包不会做的事
 

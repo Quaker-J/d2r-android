@@ -185,10 +185,35 @@ static void *boot(void *argument) {
         }
         atomic_store(&display_hz,hz);LOG("[android] display maximum refresh=%.3f Hz reported=%d Hz (read-only capability query)",rate,hz);
     }
-    const char *modules[]={"main","sdk","subsdk0"};for(unsigned i=0;i<3;i++)for(unsigned j=0;j<2;j++){char name[80];snprintf(name,sizeof name,"%s.%s.tsv",modules[i],j?"gates":"fixups");copy_asset(s->activity,metadata,name);}
     Dl_info info;if(!dladdr((void*)boot,&info)||!info.dli_fname)die("Native library directory lookup");char library[1024];snprintf(library,sizeof library,"%s",info.dli_fname);char *slash=strrchr(library,'/');if(!slash)die("Native library path");*slash=0;setenv("DM_ANDROID_LIBDIR",library,1);
-    snprintf(path,sizeof path,"%s/romfs",s->activity->externalDataPath);setenv("DM_ROMFS",path,1);
-    snprintf(path,sizeof path,"%s/shaders",s->activity->externalDataPath);setenv("DM_VK_SHADERS",path,1);
+    // 导入的数据包优先：启动界面把包解到固定的 d2r-package/ 下，只要 manifest.json 在，就用包里的模块、资源和着色器。
+    // 否则回落到默认位置：模块来自 APK 自带 asset，romfs 与 shaders 是手工推送到外部目录的那两份。
+    // An imported package wins: the launcher unpacks it into a fixed d2r-package/ directory and, whenever
+    // manifest.json is present, we use the modules, assets and shaders inside it. Otherwise we fall back to the
+    // defaults: modules from the APK's own assets, romfs and shaders as pushed to the external directory by hand.
+    char package_manifest[1200];
+    int package_length=snprintf(package_manifest,sizeof package_manifest,"%s/d2r-package/manifest.json",s->activity->externalDataPath);
+    int imported=package_length>0&&(size_t)package_length<sizeof package_manifest&&access(package_manifest,F_OK)==0;
+    if(imported){
+        // 模块必须来自内部存储：外部存储是 noexec 挂载（实测 /storage/emulated 带 noexec），从那里 dlopen 会失败。
+        // 大资源仍在外部目录，那里放得下 GB 级数据。
+        // Modules must come from internal storage: external storage is mounted noexec (measured on
+        // /storage/emulated) and dlopen from there fails. The bulk assets stay external, where the gigabytes fit.
+        snprintf(metadata,sizeof metadata,"%s/d2r-package/game",s->activity->internalDataPath);mkdir(metadata,0700);
+        snprintf(path,sizeof path,"%s/d2r-package/romfs",s->activity->externalDataPath);setenv("DM_ROMFS",path,1);
+        snprintf(path,sizeof path,"%s/d2r-package/shaders",s->activity->externalDataPath);setenv("DM_VK_SHADERS",path,1);
+        // 模块目录单独一个变量：DM_ANDROID_LIBDIR 归图形驱动找 hook 库用，见 loader.c 的说明。
+        // A separate variable for the module directory: DM_ANDROID_LIBDIR belongs to the graphics driver's hook
+        // lookup, as documented in loader.c.
+        setenv("DM_GUEST_LIBDIR",metadata,1);
+        LOG("[android] imported package in use game=%s",metadata);
+    }else{
+        const char *modules[]={"main","sdk","subsdk0"};for(unsigned i=0;i<3;i++)for(unsigned j=0;j<2;j++){char name[80];snprintf(name,sizeof name,"%s.%s.tsv",modules[i],j?"gates":"fixups");copy_asset(s->activity,metadata,name);}
+        snprintf(path,sizeof path,"%s/romfs",s->activity->externalDataPath);setenv("DM_ROMFS",path,1);
+        snprintf(path,sizeof path,"%s/shaders",s->activity->externalDataPath);setenv("DM_VK_SHADERS",path,1);
+        unsetenv("DM_GUEST_LIBDIR");
+        LOG("[android] no imported package; using APK assets and pushed romfs/shaders");
+    }
     snprintf(path,sizeof path,"%s/save",s->activity->internalDataPath);mkdir(path,0700);setenv("DM_SAVE",path,1);
     // 私有可重建的驱动缓存独立于游戏存档；不可写时正常使用内存缓存。
     // Keep rebuildable driver data separate from saves; an unwritable directory falls back to the in-memory cache.

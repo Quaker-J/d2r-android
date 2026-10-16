@@ -48,19 +48,36 @@ def collect_game(directory):
 
 
 def collect_romfs(directory):
-    """RomFS 只需要 data/ 下的资源档案；其它东西游戏不读，放进包里只是白白变大。"""
+    """把 data/ 下的**所有**文件都打包，不按扩展名筛选。
+
+    曾经只收 .data 与 .psv，漏掉了 `build_key.txt`，结果导入后的包启动时游戏报
+    "TACT Failed to load build config" 并直接返回 nnMain —— 少一个文件的表现是"游戏莫名其妙退出"，
+    极难从症状反推。游戏按需读哪些文件无法在打包时穷举，所以这里不做筛选。
+    Everything under data/ is packaged, with no extension filter. An earlier filter took only .data and .psv,
+    dropped `build_key.txt`, and the imported package made the game report "TACT Failed to load build config"
+    and return from nnMain — one missing file looks like the game randomly quitting. Which files the game reads
+    cannot be enumerated at packaging time, so nothing is filtered here.
+    """
     require_directory(directory, "romfs")
     data = directory / "data"
     if not data.is_dir():
         raise PackageError(f"romfs directory has no data/ subdirectory: {directory}")
-    entries = sorted(p for p in data.iterdir() if p.is_file() and p.suffix in ROMFS_EXTENSIONS)
+    entries = sorted(p for p in data.rglob("*") if p.is_file())
     if not entries:
-        raise PackageError(f"romfs data/ has no {'/'.join(ROMFS_EXTENSIONS)} files: {data}")
+        raise PackageError(f"romfs data/ is empty: {data}")
     return entries
 
 
 def collect_shaders(directory):
-    """着色器目录必须带分组档位文件：档位与 GPU 策略不一致时运行时会直接终止，不能靠猜。"""
+    """着色器目录必须带分组档位文件，而且它**必须打进包里**。
+
+    运行时（gpu_driver.c 的 profile_matches）在加载驱动前会读 `<shaders>/host-subgroup-size.txt`，
+    缺了直接中止启动。这个文件既用来读档位值，也是运行时依赖，所以不能只读不打包 ——
+    漏掉它会让导入后的包一启动就死在驱动检查上。
+    The profile file must be both read and packaged: the runtime reads <shaders>/host-subgroup-size.txt before
+    loading the driver and aborts without it. Reading it but not shipping it makes an imported package die at
+    the driver check.
+    """
     require_directory(directory, "shaders")
     profile = directory / "host-subgroup-size.txt"
     if not profile.is_file():
@@ -69,8 +86,8 @@ def collect_shaders(directory):
         subgroup = int(profile.read_text().strip())
     except ValueError:
         raise PackageError("host-subgroup-size.txt is not a plain integer")
-    entries = sorted(p for p in directory.iterdir() if p.is_file() and p.name != profile.name)
-    if not entries:
+    entries = sorted(p for p in directory.iterdir() if p.is_file())
+    if len(entries) < 2:
         raise PackageError(f"shaders directory has no modules: {directory}")
     return subgroup, entries
 
