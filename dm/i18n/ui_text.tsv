@@ -348,3 +348,15 @@ dmAndroidPadLeft	←	←	Android 虚拟手柄键帽
 dmAndroidPadUp	↑	↑	Android 虚拟手柄键帽
 dmAndroidPadRight	→	→	Android 虚拟手柄键帽
 dmAndroidPadDown	↓	↓	Android 虚拟手柄键帽
+dmAndroidLaunchTitle	暗黑破坏神 II：狱火重生	Diablo II: Resurrected	Android 启动界面
+dmAndroidLaunchSubtitle	Android 移植 · 启动设置	Android port · launch settings	Android 启动界面
+dmAndroidLaunchOverlay	显示调试信息（FPS / 功耗）	Show debug overlay (FPS / power)	Android 启动界面
+dmAndroidLaunchOverlayNote	关闭后游戏中不显示浮层；按住不影响首帧检测	Hides the in-game overlay; the first-frame watchdog keeps running	Android 启动界面
+dmAndroidLaunchProfile	画面档位	Graphics profile	Android 启动界面
+dmAndroidLaunchHandheld	掌机 1280×720	Handheld 1280×720	Android 启动界面
+dmAndroidLaunchConsole	主机 1600×900	Docked 1600×900	Android 启动界面
+dmAndroidLaunchGameFiles	游戏文件	Game files	Android 启动界面
+dmAndroidLaunchKeys	密钥文件	Key file	Android 启动界面
+dmAndroidLaunchNotSet	未设置	Not set	Android 启动界面
+dmAndroidLaunchStart	启动游戏	Start game	Android 启动界面
+dmAndroidLaunchPending	游戏文件与密钥的解析尚未接入，当前使用应用内已有的数据启动	Parsing game files and keys is not wired up yet; this starts with the data already inside the app	Android 启动界面

@@ -1,3 +1,6 @@
 /build/
 /local.env
 __pycache__/
+# 本机构建素材（例如自己准备的启动画面背景图）：只进本机 APK，不进源码发布。
+# Machine-local build inputs (e.g. a self-supplied launcher backdrop): they go into the local APK only, never the source release.
+/local/

@@ -5,6 +5,7 @@ Build a standalone ARM64 NativeActivity APK and runtime tests without Gradle.
 import argparse
 import os
 from pathlib import Path
+import re
 import shutil
 import struct
 import subprocess
@@ -14,6 +15,30 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS = Path(os.environ.get("DM_ANDROID_TOOLS", str(Path.home() / "dm-work/tools/android")))
 BIN = TOOLS / "ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+GAME_ACTIVITY = "org.d2r.android.port.D2RActivity"
+LAUNCHER_NAME = "org.d2r.android.port.LauncherActivity"
+# 正式构建把仓库清单里的单个 NativeActivity 换成这两条：启动界面当入口，游戏本体降级成它启动的第二个页面。
+# 探针构建走不到这里：它没有 dex，清单里不能出现 Java 页面。
+# The release build swaps the repository manifest's single NativeActivity for these two: the launcher is the
+# entry point and the game becomes the second page it starts. The probe build never reaches this branch —
+# it has no dex, so its manifest must not declare a Java activity.
+LAUNCHER_ACTIVITY_BLOCK = (
+    '<activity android:name="' + LAUNCHER_NAME + '" android:exported="true"'
+    ' android:screenOrientation="landscape" android:configChanges="orientation|screenSize|keyboardHidden"'
+    ' android:theme="@android:style/Theme.Material.NoActionBar">\n'
+    '            <intent-filter>\n'
+    '                <action android:name="android.intent.action.MAIN" />\n'
+    '                <category android:name="android.intent.category.LAUNCHER" />\n'
+    '            </intent-filter>\n'
+    '        </activity>\n'
+    '        ')
+GAME_ACTIVITY_BLOCK = (
+    '<activity android:name="' + GAME_ACTIVITY + '" android:exported="false"'
+    ' android:screenOrientation="landscape" android:configChanges="orientation|screenSize|keyboardHidden"'
+    ' android:theme="@android:style/Theme.Material.NoActionBar">\n'
+    '            <meta-data android:name="android.app.lib_name" android:value="dmandroid" />\n'
+    '        </activity>')
 
 
 def run(args, **kwargs):
@@ -75,6 +100,12 @@ def main():
     licenses.mkdir(exist_ok=True)
     for license_file in (build / "gpu-driver/licenses").glob("*.txt"):
         shutil.copyfile(license_file, licenses / license_file.name)
+    # 本机自备素材（例如自己准备的启动画面背景图）只打进本机 APK，不随源码发布；
+    # dm/android/local/ 已在 .gitignore 里，所以这里拷什么都不会污染仓库。
+    # Machine-local inputs (e.g. a self-supplied launcher backdrop) go into the local APK only. dm/android/local/
+    # is gitignored, so whatever is dropped there cannot leak into the source release.
+    for local_asset in sorted((ROOT / "local").glob("launcher-background.*")):
+        shutil.copyfile(local_asset, assets / local_asset.name)
     # 诊断GLSL缓存独立于游戏的离线Maxwell fullshader缓存，不覆盖游戏资源。
     # Keep diagnostic GLSL shaders separate from the game's offline Maxwell fullshader cache.
     shutil.copytree(build / "gpu-test-shaders", assets / "gpu-test-shaders", dirs_exist_ok=True)
@@ -99,12 +130,17 @@ def main():
              *sorted((ROOT / "java").rglob("*.java"))])
         run([TOOLS / "build-tools/d8", "--min-api", "29", "--lib", TOOLS / "platform/android.jar", "--output", dex,
              *sorted(classes.rglob("*.class"))], env=env)
-        activity = "org.d2r.android.port.D2RActivity"
+        activity = LAUNCHER_NAME
         manifest = build / "game-AndroidManifest.xml"
         # 正式游戏声明游戏类别；探针应用仍保持原类别。
         # Declare the game category only for the playable application, not the probe.
-        manifest.write_text((ROOT / "AndroidManifest.xml").read_text().replace('android:hasCode="false"', 'android:hasCode="true" android:appCategory="game"')
-                            .replace('android.app.NativeActivity', activity).replace('0.1-runtime-probe', '0.2-android-port'))
+        source = (ROOT / "AndroidManifest.xml").read_text()
+        source = source.replace('android:hasCode="false"', 'android:hasCode="true" android:appCategory="game"')
+        source = source.replace('0.1-runtime-probe', '0.2-android-port')
+        source, replaced = re.subn(r'<activity android:name="android\.app\.NativeActivity".*?</activity>',
+                                   LAUNCHER_ACTIVITY_BLOCK + GAME_ACTIVITY_BLOCK, source, count=1, flags=re.S)
+        if replaced != 1: sys.exit("game manifest: expected exactly one NativeActivity activity block")
+        manifest.write_text(source)
     run([TOOLS / "build-tools/aapt2", "compile", "--dir", build / "res", "-o", build / "resources.zip"])
     run([TOOLS / "build-tools/aapt2", "link", "--manifest", manifest,
          "-I", TOOLS / "platform/android.jar", "-A", assets, "-o", unsigned, build / "resources.zip"])
