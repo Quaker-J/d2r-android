@@ -4,6 +4,11 @@ package org.d2r.android.port;
 
 import android.app.AlertDialog;
 import android.app.NativeActivity;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.os.BatteryManager;
 import android.os.Bundle;
 import android.text.Editable;
 import android.text.InputFilter;
@@ -28,8 +33,41 @@ public final class D2RActivity extends NativeActivity {
     private PopupWindow debugPopup;
     private TouchControls touchControls;
     private boolean activityResumed;
+    private BroadcastReceiver batteryReceiver;
+    private volatile int batteryVoltageMv = -1;
+    private volatile int batteryLevel = -1;
+    private volatile int batteryStatus = -1;
     private static native void onTextResult(long request, String text, boolean accepted);
     private static native void onTouchPad(long buttons, int leftX, int leftY, int rightX, int rightY);
+
+    // 电池读数由框架提供（system_server 读内核节点、经 Binder 返回），应用不需要 root；
+    // 直接读 /sys/class/power_supply/battery/current_now 才会被 SELinux 拒绝。
+    // Battery readings come from the framework (system_server reads the kernel node and returns it over Binder),
+    // so the app needs no root; reading /sys/class/power_supply/battery/current_now directly is SELinux-denied.
+    // 只做只读查询：不请求频率、不改变游戏或显示节拍。
+    // Read-only queries only: no rate requests, no change to game or display pacing.
+    public int batteryCurrentMa() {
+        BatteryManager manager = (BatteryManager) getSystemService(Context.BATTERY_SERVICE);
+        if (manager == null) return Integer.MIN_VALUE;
+        int raw = manager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW);
+        if (raw == 0 || raw == Integer.MIN_VALUE)
+            raw = manager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_AVERAGE);
+        if (raw == 0 || raw == Integer.MIN_VALUE) return Integer.MIN_VALUE;
+        // API 契约单位是微安，但实测本机（OPD2409 / Adreno 830）
+        // `cmd battery get current_now` = 2791，同期电池计实测均 2350 mA，数量级一致，说明本机 HAL 给的是毫安。
+        // 用数量级判单位而不是按机型硬编码：毫安读数不可能达到 20 A，微安读数在负载下不会低于 20 mA。
+        // The API contract says microamps, but on this device (OPD2409 / Adreno 830) `cmd battery get current_now`
+        // returned 2791 while the fuel gauge measured 2350 mA average, so this HAL reports milliamps. Decide by
+        // magnitude rather than by device model: a milliamp reading cannot reach 20 A, and a microamp reading
+        // under load is never below 20 mA.
+        long magnitude = Math.abs((long) raw);
+        if (magnitude >= 20000) magnitude /= 1000;
+        return magnitude > Integer.MAX_VALUE ? Integer.MIN_VALUE : (int) magnitude;
+    }
+
+    public int batteryVoltageMv() { return batteryVoltageMv; }
+    public int batteryLevelPercent() { return batteryLevel; }
+    public int batteryStatusValue() { return batteryStatus; }
 
     // 只读真实屏幕支持的最高刷新率；不请求新模式、不改变游戏或显示节拍。
     // Read the display's actual highest supported refresh rate without requesting a mode or changing pacing.
@@ -110,6 +148,18 @@ public final class D2RActivity extends NativeActivity {
         debugPopup.setInputMethodMode(PopupWindow.INPUT_METHOD_NOT_NEEDED);
         debugPopup.setBackgroundDrawable(new ColorDrawable(0));
         getWindow().getDecorView().post(() -> { if (!isFinishing() && !isDestroyed()) debugPopup.showAtLocation(getWindow().getDecorView(), Gravity.TOP | Gravity.LEFT, padding, padding); });
+        // 粘性广播：注册即回调一次当前值，之后只在系统电量变化时推送，不产生轮询开销。
+        // Sticky broadcast: registering delivers the current value once, then only on system battery changes; no polling.
+        batteryReceiver = new BroadcastReceiver() {
+            @Override public void onReceive(Context context, Intent intent) {
+                batteryVoltageMv = intent.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1);
+                int level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1);
+                int scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, 0);
+                batteryLevel = (level < 0 || scale <= 0) ? -1 : (int)Math.round(level * 100.0 / scale);
+                batteryStatus = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1);
+            }
+        };
+        registerReceiver(batteryReceiver, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
         touchControls = new TouchControls(this, (buttons, x, y) -> onTouchPad(buttons, x, y, 0, 0));
     }
 
@@ -211,6 +261,7 @@ public final class D2RActivity extends NativeActivity {
     }
 
     @Override protected void onDestroy() {
+        if (batteryReceiver != null) { unregisterReceiver(batteryReceiver); batteryReceiver = null; }
         if (touchControls != null) touchControls.destroy();
         if (debugPopup != null) debugPopup.dismiss();
         if (textDialog != null) finishText(textRequest, "", false);
