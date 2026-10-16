@@ -6,13 +6,13 @@ English: [ANDROID_PORT_PROGRESS.md](ANDROID_PORT_PROGRESS.md)
 
 ## 当前状态（继续开发先看这里）
 
-**2026-10-16 最新进度：Android 版已能进入营地并移动，稳定阶段接近 60 FPS；本轮从真机日志确认卡顿根因是"首次使用的管线在创建时现编驱动代码"（单次最高 111.987 ms），已实现"录制真实管线描述 + 下次启动后台回放预热"并构建成功（待真机安装验证）；全场景稳定 60 FPS 尚未达成。以下本节为当前状态，后面的旧版本记录仅供追溯。**
+**2026-10-16 最新进度：Android 版已能进入营地并移动，稳定阶段接近 60 FPS；卡顿根因确认为"首次使用的管线在创建时现编驱动代码"（单次最高 111.987 ms），"录制真实管线描述 + 下次启动后台回放预热"已完成真机安装并通过受控对照：冷驱动缓存下菜单最坏帧从 957 ms 降到 142 ms、进入营地从 634 ms 降到 98 ms（管线新建 562 ms → 2.5 ms 全命中）；用户实战打怪新增的 18 条特效管线也在下一局预热成功（127 条全部后台建完 447.7 ms）。全场景稳定 60 FPS 尚未达成。以下本节为当前状态，后面的旧版本记录仅供追溯。**
 
 ### 源码和功能
 
 - 私有仓库：[sydeEvans/d2r-android](https://github.com/sydeEvans/d2r-android)。保留上游许可与来源说明，不包含游戏资源、密钥或 APK。
-- 最新已拉取、构建和安装的提交：`891f596172042a7d2db702e66fb425ca0b6d6102`，分支 `main`，提交说明为 `Reduce Android Vulkan frame-time overhead`。
-- 本轮新增（已构建成功、待真机安装）：Vulkan 管线录制 + 预热（`dm/android/native/nvn_vulkan_warm.inc`）。每次真实创建图形管线后把完整状态（vs/fs 键、通道键、管线键）追加写入应用私有目录的 `pso_vk_user.tsv`；下次启动在初始化末尾开后台线程按清单逐条重建管线（建后即毁，编译结果留在驱动管线缓存），并在第一次进局读取画面处最多等待 15 秒让预热收尾，进局后不再现编。清单带版本与结构尺寸头，不符整份忽略；预热线程只做非致命加载，任何可疑记录跳过，不中断游戏。开关：`DM_PSO_MANIFEST=off` 关预热、`DM_PSO_USER=off` 关记录；与运行期共用同一份创建函数，动态状态（视口/剪裁/混合常量/深度偏置/模板掩码）一律不参与创建，保证预热与游戏命中同一驱动缓存条目。
+- 最新已构建和安装的提交：`600c165`（`Record and prewarm Vulkan pipelines to remove first-use compile hitches`）及其后的记账修复（与本文件同批提交），分支 `main`；此前基线提交 `891f596172042a7d2db702e66fb425ca0b6d6102`（`Reduce Android Vulkan frame-time overhead`）。
+- 本轮新增（已真机验证）：Vulkan 管线录制 + 预热（`dm/android/native/nvn_vulkan_warm.inc`）。每次真实创建图形管线后把完整状态（vs/fs 键、通道键、管线键）追加写入应用私有目录的 `pso_vk_user.tsv`；下次启动在初始化末尾开后台线程按清单逐条重建管线（建后即毁，编译结果留在驱动管线缓存），并在第一次进局读取画面处最多等待 15 秒让预热收尾，进局后不再现编。清单带版本与结构尺寸头，不符整份忽略；预热线程只做非致命加载，任何可疑记录跳过，不中断游戏。开关：`DM_PSO_MANIFEST=off` 关预热、`DM_PSO_USER=off` 关记录；与运行期共用同一份创建函数，动态状态（视口/剪裁/混合常量/深度偏置/模板掩码）一律不参与创建，保证预热与游戏命中同一驱动缓存条目。预热线程不记账（`resource_create_quiet`），长帧账目与慢创建日志只反映游戏线程；长帧"新建管线 N 条 + 着色器库 M 个共 X ms"的累计值修复后显示真实值。
 - 当前工作目录：`~/d2r`（2026-10-16 由 `~/dm-work/publish/d2r-android` 迁回；旧开发现场归档于 `~/dm-work/archive/d2r-old-site-20261016`）。源码只在 `~/d2r`，`~/dm-work` 仅存放工具、资源和运行产物；继续开发前应确认目录与分支。
 - 已具备 Vulkan 渲染、AAudio 声音、虚拟摇杆和按键、系统键盘输入、横屏与屏幕适配、帧率及 CPU/GPU 调试信息。
 - 本轮远端优化包括：减少无效差异导致的重复管线状态，缩小待处理内存范围和已知复制范围的查找，复用着色器资源绑定规划，调整缓存写入重试频率，触控浮层仅在状态变化时重绘。
@@ -22,10 +22,10 @@ English: [ANDROID_PORT_PROGRESS.md](ANDROID_PORT_PROGRESS.md)
 
 - 干净源码首次构建缺少 `dm_vault_tab.h`、`dm_hud_exp.h`、`dm_bright_levels.inc`。已通过原 `dm/host/Makefile` 从本地 RomFS 生成，随后生产 APK 构建和签名验证成功；中英文 Android 构建说明（`docs/ANDROID_BUILD*.md`）已补充生成步骤。
 - 可重建性验证（2026-10-16）：在全新 `git clone`（HEAD `891f596`）中按 `docs/ANDROID_BUILD.zh-CN.md` 全流程重建成功——三张生成表与既有产物字节级一致，重写后的 `libdmguest_main/sdk/subsdk0.so` 与既有构建产物逐字节一致，生产 APK 构建成功（约 4 分 47 秒）。证据：`~/dm-work/research/android-repro-verify/`。
-- 已覆盖安装到 OPPO `OPD2409`，`adb install -r` 返回 `Success`，耗时 2278 ms；实际进入已有角色的营地。未重新传送游戏资源或覆盖存档。
-- 最近一次观察无线 ADB 在线，游戏处于前台。端口会变化，连接时使用 `adb devices -l` 和 `adb mdns services` 获取实际状态。
-- 管线磁盘缓存已确认重启加载：`load=accepted bytes=1437105`。缓存读取成功不代表所有实际管线已经创建，具体提速幅度尚未做受控对照。
-- 本轮未新增或运行自动化测试；完成了生产构建、安装、实际启动、截图和日志检查。本轮仅更新 OPPO 平板，新手机尚未安装验证此提交。
+- 已覆盖安装到 OPPO `OPD2409`（`adb install -r` 均返回 `Success`，本轮三次重建各约 1.4-1.5 s，应用数据保留）；实际进入已有角色的营地并走动。未重新传送游戏资源或覆盖存档。
+- 最近一次观察无线 ADB 在线。端口会变化，连接时使用 `adb devices -l` 和 `adb mdns services` 获取实际状态。
+- 管线磁盘缓存已确认重启加载：`load=accepted bytes=1739385`。受控对照（删除驱动缓存 blob、移开清单）证明预热把菜单 826 ms、进营地 562 ms 的现编时间挪到了后台（见下表）。
+- 本轮未新增或运行自动化测试；完成了生产构建、安装、实际启动、进营地走动、用户实战打怪日志和受控 A/B 对照检查。本轮仅更新 OPPO 平板，新手机尚未安装验证此提交。
 
 ### 实际效果和限制
 
@@ -33,19 +33,23 @@ English: [ANDROID_PORT_PROGRESS.md](ANDROID_PORT_PROGRESS.md)
 | --- | --- |
 | 安装后静止营地 | 截图 60.0 FPS，CPU 7.7 ms、GPU 7.4 ms；两个连续 120 帧窗口无超过 33 ms 的帧，最大间隔 23.640、24.435 ms |
 | 后续营地移动 | 截图 58.2 FPS；随后十个 60 帧窗口为 59.38–60.69 FPS，对应五个 120 帧窗口无超过 33 ms 的帧，窗口最大间隔 22.826–31.482 ms |
-| 新管线编译卡顿 | 根因已确认：整段会话 26 条 `[vulkan-create-slow]` 全部是首次使用的管线在 `vkCreateGraphicsPipelines` 内现编，最高 111.987 ms（frame 109872，同帧间隔 133.958 ms、线程 CPU 126.224 ms）；已实现录制+预热修复，待安装后验证 |
+| 新管线编译卡顿（修复前） | 根因已确认：整段会话 26 条 `[vulkan-create-slow]` 全部是首次使用的管线在 `vkCreateGraphicsPipelines` 内现编，最高 111.987 ms（frame 109872，同帧间隔 133.958 ms、线程 CPU 126.224 ms） |
+| 预热对照 A（冷驱动缓存、无清单） | create-slow 26 条（最高 117.9 ms）；菜单最坏帧 957.2 ms（新建 30 条 826.0 ms）与 561.9 ms；进入营地 633.6 ms（新建 32 条 562.0 ms）；营地走动 140.5/89.3 ms |
+| 预热对照 B（冷驱动缓存 + 109 条预热） | 渲染线程图形管线现编 0 条；菜单 141.8 ms（新建 30 条 52.1 ms）、进营地 98.0 ms（新建 28 条 2.5 ms 全命中）、营地走动无 >46.8 ms 帧；预热线程后台建完 109 条 2114.0 ms（帧 1 仅 26.2 ms 未被阻塞） |
+| 用户实战打怪（预热局） | 首次击杀特效 18 条新管线现编，卡顿簇 119.1/103.3/102.7/102.1/99.4 ms；已全部录制，下一局 `built=127 wall_ms=447.7` 预热成功，开局唯一 create-slow 为 1 条计算管线（26.7 ms） |
 | 其他长帧 | 原 91.010 ms 长帧已结案：frame 110574 为两次管线编译（38.5+31.8 ms）加 4 ms 着色器加载；会话共 3126 条长帧，其中 95% 是 21–30 ms 轻超帧（线程 CPU 偶发冲到 18–19 ms 错过一次垂直同步），表情轮盘簇（248/193 ms，提交+出图仅 4.2/22.8 ms）与恢复/切场景后簇仍未解释 |
 
 当前截图中人物、营地、地面、界面和触控按键正常，未出现此前的黑屏。以上只覆盖已观察的营地场景，不能证明全部地图、技能、战斗和光照正确，也不能宣称全程稳定 60 FPS。FPS 是应用统计，不能等同于每帧都准时显示。
 
-本机证据：`~/dm-work/research/android-latest-891f596/`。成功构建见 `build.log`，生成表头见 `generate-tables.log`，安装后日志见 `game.log`，后续观察见 `current-game.log`；截图为 `launch.png`、`camp.png`、`current.png`，摘要为 `RESULT.md`。本轮日志分析与预热实现记录：`~/dm-work/research/android-pipeline-prewarm-20261016/`（含拉取的 `live-game.log` 与 `RESULT.zh-CN.md`）。本机产物不随源码发布。
+本机证据：`~/dm-work/research/android-latest-891f596/`。成功构建见 `build.log`，生成表头见 `generate-tables.log`，安装后日志见 `game.log`，后续观察见 `current-game.log`；截图为 `launch.png`、`camp.png`、`current.png`，摘要为 `RESULT.md`。本轮日志分析、预热实现与真机验证记录：`~/dm-work/research/android-pipeline-prewarm-20261016/`（含 `live-game.log` 基线、`session2a.log` 预热局、`logA.log`/`logB.log` 对照、`session_user.log` 实战打怪、`session_verify.log` 127 条验证、截图与 `RESULT.zh-CN.md`）。本机产物不随源码发布。
 
 ### 下一步
 
-1. 安装本轮预热构建到真机；实际游玩一段让 `pso_vk_user.tsv` 自动积累，重启后对照 `[vulkan-create-slow]` 与长帧数量验证首次编译卡顿消失（预热主要价值在驱动更新、清数据或新设备配种子清单时把编译挪到加载期）。
-2. 继续定位剩余长帧：21–30 ms 轻超帧的线程 CPU 波动点（常态 12.8 ms，偶发 18–19 ms）、表情轮盘簇、恢复/切场景后簇；不以单张截图替代稳定性结论。
-3. 在新手机部署同一提交，确认显示、触控和实际帧率。
-4. 进度与构建说明已整理提交并推送（2026-10-16），任何电脑 clone 后可按 `docs/ANDROID_BUILD.zh-CN.md` 重建；后续按上方维护约定保持最新。主线保持 Android 优化，LASRecomp 和 Eden 作为渲染实现参考。
+1. 计算管线补录：至今计算管线（compute）仍是首次现编（对照 A 局 56.6 ms、B 局 46.4 ms、验证局 26.7 ms）；在录制端加 compute 挂点并扩展清单格式后可一并预热。
+2. 把本机积累的 `pso_vk_user.tsv`（127 条：菜单 + 营地 + 首次打怪特效）整理为仓库种子清单，随构建推送 `DM_VK_SHADERS`，让驱动更新/清数据/新设备直接受益。
+3. 继续定位剩余长帧：21–30 ms 轻超帧的线程 CPU 波动点（常态 12.8 ms，偶发 18–19 ms）、表情轮盘簇、恢复/切场景后簇；不以单张截图替代稳定性结论。
+4. 在新手机部署同一提交，确认显示、触控和实际帧率。
+5. 进度与构建说明已整理提交并推送（2026-10-16），任何电脑 clone 后可按 `docs/ANDROID_BUILD.zh-CN.md` 重建；后续按上方维护约定保持最新。主线保持 Android 优化，LASRecomp 和 Eden 作为渲染实现参考。
 
 ## 历史进度（以下版本、端口与待办按当时状态保留）
 

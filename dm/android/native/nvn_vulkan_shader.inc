@@ -20,13 +20,21 @@ static pthread_mutex_t graphics_object_lock=PTHREAD_MUTEX_INITIALIZER;
 typedef struct resource_create_start {uint64_t wall,cpu;} resource_create_start;
 typedef struct resource_create_stats {uint64_t count,wall,cpu,slow,max_wall,max_cpu,max_wall_frame,max_cpu_frame,window,logged;} resource_create_stats;
 static resource_create_stats resource_creates[3];
+// NVN 长帧账目用的累计值：真实创建条数与墙钟纳秒，永不按窗口清零（调用方取差）。
+// Cumulative totals for the NVN long-frame accounting: genuine creation counts and wall nanoseconds, never reset per window (the caller diffs them).
+static uint64_t resource_created_count[3],resource_created_ns[3];
+// 预热线程不记账：后台创建的成本不属于任何一帧，预热自报 [vulkan-pso-warm] 明细。
+// The warm thread does not account: background creation cost belongs to no frame; the warm reports its own [vulkan-pso-warm] details.
+static _Thread_local int resource_create_quiet;
 static const char *resource_create_names[]={"shader_load","graphics_pipeline","compute_pipeline"};
 static resource_create_start resource_create_begin(void) {
     return (resource_create_start){dm_android_clock_ns(CLOCK_MONOTONIC),dm_android_clock_ns(CLOCK_THREAD_CPUTIME_ID)};
 }
 static void resource_create_end(unsigned kind,resource_create_start start,const char *shader,const char *fragment) {
+    if(resource_create_quiet)return;
     uint64_t cpu=dm_android_clock_ns(CLOCK_THREAD_CPUTIME_ID)-start.cpu,wall=dm_android_clock_ns(CLOCK_MONOTONIC)-start.wall,frame=presents+1;
     resource_create_stats *s=&resource_creates[kind];s->count++;s->wall+=wall;s->cpu+=cpu;
+    resource_created_count[kind]++;resource_created_ns[kind]+=wall;
     if(wall>s->max_wall){s->max_wall=wall;s->max_wall_frame=frame;}if(cpu>s->max_cpu){s->max_cpu=cpu;s->max_cpu_frame=frame;}
     if(wall<=2000000&&cpu<=2000000)return;s->slow++;
     uint64_t window=(frame-1)/60;if(s->window!=window){s->window=window;s->logged=0;}

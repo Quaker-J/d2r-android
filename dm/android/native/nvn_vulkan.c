@@ -966,8 +966,8 @@ void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads) { *uploads = *reuploa
 uint64_t mtl_pkg_miss(void) { return 0; }
 uint64_t mtl_upload_ns_take(void) { return 0; }
 uint64_t mtl_upload_gpu_ns_take(void) { return 0; }
-void mtl_create_stats(uint64_t *lib, uint64_t *pso) { *lib = 0; *pso = pipeline_creations; }
-void mtl_create_ns(uint64_t *lib, uint64_t *pso) { *lib = *pso = 0; }
+void mtl_create_stats(uint64_t *lib, uint64_t *pso) { *lib = resource_created_count[0]; *pso = resource_created_count[1] + resource_created_count[2]; }
+void mtl_create_ns(uint64_t *lib, uint64_t *pso) { *lib = resource_created_ns[0]; *pso = resource_created_ns[1] + resource_created_ns[2]; }
 uint64_t mtl_upload_bytes(void) { return 0; }
 void mtl_alloc_stats(uint64_t *wait, uint64_t *grow, int *n) { *wait = *grow = 0; *n = 1; }
 uint32_t mtl_present_qos(void) { return 0; }

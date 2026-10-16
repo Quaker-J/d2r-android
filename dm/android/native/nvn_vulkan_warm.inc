@@ -180,6 +180,7 @@ static int pso_warm_one(const pso_record *record) {
 }
 static void *pso_warm_main(void *unused) {
     (void)unused;pthread_setname_np(pthread_self(),"D2R PSO warm");
+    resource_create_quiet=1;   // 预热创建全部不记账（长帧账目与慢创建明细只管游戏线程）| warm creations never account (long-frame totals and slow-create details cover the game thread only)
     uint64_t begin=dm_android_clock_ns(CLOCK_MONOTONIC),built=0,skipped=0;
     for(size_t i=0;i<pso_record_count;i++){
         if(pso_warm_one(&pso_records[i]))built++;else skipped++;
