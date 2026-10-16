@@ -42,6 +42,7 @@ static void reset_environment(void) {
 #endif
     assert(!setenv("DM_OPMODE", "old-operation-mode", 1));
     assert(!setenv("DM_HID_RECEIPT_LOG", "old-receipt-path", 1));
+    assert(!setenv("DM_DEBUG_OVERLAY", "old-overlay-mode", 1));
 }
 
 static void write_bytes(const void *text, size_t length) {
@@ -52,7 +53,7 @@ static void write_bytes(const void *text, size_t length) {
 static void write_config(const char *text) { write_bytes(text, strlen(text)); }
 
 static dm_android_launch_settings apply_ok(const char *directory) {
-    dm_android_launch_settings result = {-99, -99, -99};
+    dm_android_launch_settings result = {-99, -99, -99, -99};
     char error[512] = "stale error";
     assert(dm_android_launch_settings_apply(directory, &result, error, sizeof error));
     assert(!error[0]);
@@ -62,25 +63,26 @@ static dm_android_launch_settings apply_ok(const char *directory) {
 static void expect_bad(const char *text, const char *message) {
     reset_environment();
     write_config(text);
-    dm_android_launch_settings result = {17, 18, 19};
+    dm_android_launch_settings result = {17, 18, 19, 20};
     char error[512];
     assert(!dm_android_launch_settings_apply(temporary, &result, error, sizeof error));
     assert(strstr(error, message));
-    assert(result.present == 17 && result.operation_mode == 18 && result.input_receipts == 19);
+    assert(result.present == 17 && result.operation_mode == 18 && result.input_receipts == 19 && result.debug_overlay == 20);
     expect_env("DM_OPMODE", "old-operation-mode");
     expect_env("DM_HID_RECEIPT_LOG", "old-receipt-path");
+    expect_env("DM_DEBUG_OVERLAY", "old-overlay-mode");
     tests++;
 }
 
 static void missing_defaults(void) {
     reset_environment();
     dm_android_launch_settings result = apply_ok(temporary);
-    assert(!result.present && result.operation_mode == -1 && result.input_receipts == -1);
+    assert(!result.present && result.operation_mode == -1 && result.input_receipts == -1 && result.debug_overlay == -1);
     expect_env("DM_OPMODE", "old-operation-mode"); expect_env("DM_HID_RECEIPT_LOG", "old-receipt-path");
     tests++;
     assert(!unsetenv("DM_OPMODE") && !unsetenv("DM_HID_RECEIPT_LOG"));
     result = apply_ok(temporary);
-    assert(!result.present && result.operation_mode == -1 && result.input_receipts == -1);
+    assert(!result.present && result.operation_mode == -1 && result.input_receipts == -1 && result.debug_overlay == -1);
     expect_env("DM_OPMODE", NULL); expect_env("DM_HID_RECEIPT_LOG", NULL);
     tests++;
 }
@@ -88,7 +90,7 @@ static void missing_defaults(void) {
 static void valid_settings(void) {
     reset_environment(); write_config("");
     dm_android_launch_settings result = apply_ok(temporary);
-    assert(result.present && result.operation_mode == -1 && result.input_receipts == -1);
+    assert(result.present && result.operation_mode == -1 && result.input_receipts == -1 && result.debug_overlay == -1);
     expect_env("DM_OPMODE", "old-operation-mode"); expect_env("DM_HID_RECEIPT_LOG", "old-receipt-path");
     tests++;
 
@@ -127,7 +129,7 @@ static void valid_settings(void) {
 
     reset_environment(); write_config("# comment\n\t \r\n");
     result = apply_ok(temporary);
-    assert(result.present && result.operation_mode == -1 && result.input_receipts == -1);
+    assert(result.present && result.operation_mode == -1 && result.input_receipts == -1 && result.debug_overlay == -1);
     expect_env("DM_OPMODE", "old-operation-mode"); expect_env("DM_HID_RECEIPT_LOG", "old-receipt-path");
     tests++;
 
@@ -144,6 +146,41 @@ static void valid_settings(void) {
     tests++;
 }
 
+static void overlay_settings(void) {
+    // 关掉浮层是一个显式设置，必须写成 "0" 而不是清空变量，否则“没指定”和“关掉”就区分不出来。
+    // Turning the overlay off is an explicit setting, so it writes "0" rather than unsetting the variable;
+    // otherwise "unspecified" and "off" would be indistinguishable.
+    reset_environment(); write_config("debug_overlay=0\n");
+    dm_android_launch_settings result = apply_ok(temporary);
+    assert(result.present && result.operation_mode == -1 && result.input_receipts == -1 && result.debug_overlay == 0);
+    expect_env("DM_OPMODE", "old-operation-mode");
+    expect_env("DM_HID_RECEIPT_LOG", "old-receipt-path");
+    expect_env("DM_DEBUG_OVERLAY", "0");
+    tests++;
+
+    reset_environment(); write_config("debug_overlay=1\n");
+    result = apply_ok(temporary);
+    assert(result.debug_overlay == 1);
+    expect_env("DM_DEBUG_OVERLAY", "1");
+    tests++;
+
+    // 省略该键时不动已有环境值，与另外两个键同一约定。
+    // Omitting the key leaves the existing environment value untouched, matching the other two keys.
+    reset_environment(); write_config("operation_mode=handheld\n");
+    result = apply_ok(temporary);
+    assert(result.debug_overlay == -1);
+    expect_env("DM_DEBUG_OVERLAY", "old-overlay-mode");
+    tests++;
+
+    // 三个键一起写：第三项环境写入必须真的发生，且前面两项不受影响。
+    // All three keys together: the third environment write must actually happen without disturbing the first two.
+    reset_environment(); write_config("operation_mode=console\ninput_receipts=0\ndebug_overlay=0\n");
+    result = apply_ok(temporary);
+    assert(result.operation_mode == 1 && result.input_receipts == 0 && result.debug_overlay == 0);
+    expect_env("DM_OPMODE", "1"); expect_env("DM_HID_RECEIPT_LOG", NULL); expect_env("DM_DEBUG_OVERLAY", "0");
+    tests++;
+}
+
 static void malformed_settings(void) {
     expect_bad("operation_mode=handheld\nDM_VK_SHADERS=/tmp/fake\n", "unknown launch settings key on line 2");
     expect_bad("input_receipts=1\noperation_mode=handheld\noperation_mode=console\n", "duplicate launch settings key on line 3");
@@ -157,6 +194,10 @@ static void malformed_settings(void) {
     expect_bad("operation_mode=handheld\n=1\n", "unknown launch settings key on line 2");
     expect_bad("operation_mode=handheld\ninput_receipts=1=0\n", "input_receipts must be 0 or 1");
     expect_bad("operation_mode=handheld # note\n", "operation_mode must be handheld or console");
+    expect_bad("debug_overlay=2\n", "debug_overlay must be 0 or 1");
+    expect_bad("debug_overlay=true\n", "debug_overlay must be 0 or 1");
+    expect_bad("debug_overlay=\n", "debug_overlay must be 0 or 1");
+    expect_bad("operation_mode=handheld\ndebug_overlay=0\ndebug_overlay=1\n", "duplicate launch settings key on line 3");
 }
 
 static void size_limits(void) {
@@ -164,7 +205,7 @@ static void size_limits(void) {
     memset(content, 'x', 256); content[0] = '#'; content[256] = 0;
     reset_environment(); write_config(content);
     dm_android_launch_settings result = apply_ok(temporary);
-    assert(result.present && result.operation_mode == -1 && result.input_receipts == -1);
+    assert(result.present && result.operation_mode == -1 && result.input_receipts == -1 && result.debug_overlay == -1);
     expect_env("DM_OPMODE", "old-operation-mode"); expect_env("DM_HID_RECEIPT_LOG", "old-receipt-path");
     tests++;
 
@@ -174,7 +215,7 @@ static void size_limits(void) {
 
     memset(content, '\n', 4096); content[4096] = 0;
     reset_environment(); write_config(content); result = apply_ok(temporary);
-    assert(result.present && result.operation_mode == -1 && result.input_receipts == -1);
+    assert(result.present && result.operation_mode == -1 && result.input_receipts == -1 && result.debug_overlay == -1);
     expect_env("DM_OPMODE", "old-operation-mode"); expect_env("DM_HID_RECEIPT_LOG", "old-receipt-path");
     tests++;
 
@@ -184,9 +225,9 @@ static void size_limits(void) {
     reset_environment();
     const char nul_content[] = "operation_mode=handheld\n\0input_receipts=1\n";
     write_bytes(nul_content, sizeof nul_content - 1);
-    result = (dm_android_launch_settings){17, 18, 19}; char error[512];
+    result = (dm_android_launch_settings){17, 18, 19, 20}; char error[512];
     assert(!dm_android_launch_settings_apply(temporary, &result, error, sizeof error));
-    assert(strstr(error, "NUL byte") && result.present == 17 && result.operation_mode == 18 && result.input_receipts == 19);
+    assert(strstr(error, "NUL byte") && result.present == 17 && result.operation_mode == 18 && result.input_receipts == 19 && result.debug_overlay == 20);
     expect_env("DM_OPMODE", "old-operation-mode"); expect_env("DM_HID_RECEIPT_LOG", "old-receipt-path");
     tests++;
 }
@@ -196,7 +237,7 @@ static void invalid_paths(void) {
     char error[512];
     reset_environment();
     for (size_t i = 0; i < sizeof paths / sizeof paths[0]; i++) {
-        dm_android_launch_settings result = {17, 18, 19};
+        dm_android_launch_settings result = {17, 18, 19, 20};
         assert(!dm_android_launch_settings_apply(paths[i], &result, error, sizeof error));
         assert(strstr(error, "absolute application temp directory") && result.present == 17);
         expect_env("DM_OPMODE", "old-operation-mode"); expect_env("DM_HID_RECEIPT_LOG", "old-receipt-path");
@@ -240,11 +281,11 @@ static void environment_failures(void) {
             // 精确让第二项环境写失败；旧值存在和不存在都必须恢复，result 不发布。
             // Fail precisely the second environment write; restore both present and absent old values, and do not publish result.
             environment_writes = 0; fail_write_mask = 1u << 2;
-            dm_android_launch_settings result = {17, 18, 19};
+            dm_android_launch_settings result = {17, 18, 19, 20};
             assert(!dm_android_launch_settings_apply(temporary, &result, error, sizeof error));
             fail_write_mask = 0;
             assert(strstr(error, "previous environment restored"));
-            assert(result.present == 17 && result.operation_mode == 18 && result.input_receipts == 19);
+            assert(result.present == 17 && result.operation_mode == 18 && result.input_receipts == 19 && result.debug_overlay == 20);
             expect_env("DM_OPMODE", absent ? NULL : "old-operation-mode");
             expect_env("DM_HID_RECEIPT_LOG", absent ? NULL : "old-receipt-path");
             tests++;
@@ -276,7 +317,7 @@ int main(int argc, char **argv) {
     assert(mkdtemp(temporary));
     n = snprintf(config_path, sizeof config_path, "%s/launch-settings.conf", temporary); assert(n > 0 && n < (int)sizeof config_path);
     n = snprintf(receipt_path, sizeof receipt_path, "%s/input-receipts.jsonl", temporary); assert(n > 0 && n < (int)sizeof receipt_path);
-    missing_defaults(); valid_settings(); malformed_settings(); size_limits(); invalid_paths();
+    missing_defaults(); valid_settings(); overlay_settings(); malformed_settings(); size_limits(); invalid_paths();
 #ifdef DM_LAUNCH_SETTINGS_TEST_WRAP_ENV
     environment_failures();
 #endif

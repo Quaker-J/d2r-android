@@ -188,6 +188,17 @@ public final class D2RActivity extends NativeActivity {
         runOnUiThread(() -> { if (debugView != null && !isFinishing() && !isDestroyed()) debugView.setText(text); });
     }
 
+    // 由原生调试线程在启动时调用一次；关掉时把浮层内容整个隐藏，而不只是停止刷新。
+    // 弹窗本身留着不销毁（它是 setTouchable(false)，不抢输入），只是没有可见内容。
+    // Called once at startup by the native debug thread. Hiding removes the overlay content entirely rather than
+    // merely stopping refreshes; the popup itself stays (it is setTouchable(false) and takes no input), just empty.
+    public void setDebugOverlay(boolean visible) {
+        runOnUiThread(() -> {
+            if (debugView != null && !isFinishing() && !isDestroyed())
+                debugView.setVisibility(visible ? android.view.View.VISIBLE : android.view.View.GONE);
+        });
+    }
+
     private void finishText(long request, String text, boolean accepted) {
         if (textRequest != request) return;
         textRequest = 0;

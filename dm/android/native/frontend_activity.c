@@ -115,33 +115,48 @@ static void *progress_watch(void *argument) {
     battery_level=(*env)->GetMethodID(env,klass,"batteryLevelPercent","()I");
     battery_status=(*env)->GetMethodID(env,klass,"batteryStatusValue","()I");
     if((*env)->ExceptionCheck(env)){(*env)->ExceptionDescribe(env);(*env)->ExceptionClear(env);battery_current=battery_voltage=battery_level=battery_status=NULL;}
+    // 浮层开关由启动界面写进 launch-settings.conf，经 DM_DEBUG_OVERLAY 传到这里；只在启动时读一次，运行中不切换。
+    // The launcher writes the overlay switch into launch-settings.conf and it reaches us as DM_DEBUG_OVERLAY;
+    // read once at startup, never toggled at runtime. Absent or any value other than "0" keeps the overlay on.
+    const char *overlay_setting=getenv("DM_DEBUG_OVERLAY");
+    int overlay=!(overlay_setting&&!strcmp(overlay_setting,"0"));
+    jmethodID overlay_method=(*env)->GetMethodID(env,klass,"setDebugOverlay","(Z)V");
+    if((*env)->ExceptionCheck(env)){(*env)->ExceptionDescribe(env);(*env)->ExceptionClear(env);overlay_method=NULL;}
+    if(overlay_method)(*env)->CallVoidMethod(env,a->clazz,overlay_method,(jboolean)(overlay!=0));
+    else LOG("[android] debug overlay switch unavailable; showing the overlay");
     uint64_t previous=0;unsigned unchanged=0;
     for(unsigned i=0;!atomic_load(&s->debug_stop);i++){usleep(500000);dm_android_debug_stats stats;dm_android_debug_get(&stats);dm_hud_info hud;dm_hud_get(&hud);
         pthread_mutex_lock(&text_request.lock);int keyboard=text_request.serial&&!text_request.done;pthread_mutex_unlock(&text_request.lock);
-        int dm_loadscreen_up(void);const char *stage=dm_ui(keyboard?"dmAndroidStageText":dm_loadscreen_up()?"dmAndroidStageLoading":hud.valid?"dmAndroidStageGame":stats.frame?"dmAndroidStageMenu":"dmAndroidStageBoot");
-        unsigned long pages=0;FILE *memory=fopen("/proc/self/statm","r");if(memory){unsigned long total;fscanf(memory,"%lu %lu",&total,&pages);fclose(memory);}
-        char gpu[32];if(stats.gpu_valid)snprintf(gpu,sizeof gpu,"%.1f",stats.gpu_ms);else snprintf(gpu,sizeof gpu,"--");
-        // 电池读数经框架获取（应用不需要 root）；读不到就明确显示 --，不伪造数值。
-        // Battery readings come from the framework (no root needed); anything unavailable shows "--" rather than a made-up number.
-        char power[160];
-        if(battery_current&&battery_voltage&&battery_level&&battery_status){
-            int milliamps=(*env)->CallIntMethod(env,a->clazz,battery_current);
-            int millivolts=(*env)->CallIntMethod(env,a->clazz,battery_voltage);
-            int capacity=(*env)->CallIntMethod(env,a->clazz,battery_level);
-            int status=(*env)->CallIntMethod(env,a->clazz,battery_status);
-            if((*env)->ExceptionCheck(env)){(*env)->ExceptionDescribe(env);(*env)->ExceptionClear(env);milliamps=-1;}
-            char value[64];
-            if(milliamps<0)snprintf(value,sizeof value,"--");
-            else if(millivolts>0){double volts=millivolts/1000.0;snprintf(value,sizeof value,"%d mA | %.2f V | %.1f W",milliamps,volts,milliamps*volts/1000.0);}
-            else snprintf(value,sizeof value,"%d mA",milliamps);
-            // 本机放电时 HAL 也返回正值，方向不能靠符号判断；充电与否用框架状态（2 充电 / 5 已满）决定。
-            // This HAL reports a positive value while discharging too, so direction comes from the framework status (2 charging / 5 full), not the sign.
-            int charging=status==2||status==5;
-            snprintf(power,sizeof power,dm_ui(charging?"dmAndroidCharging":"dmAndroidPower"),value,capacity<0?0.0:(double)capacity);
-        }else snprintf(power,sizeof power,dm_ui("dmAndroidPower"),"--",0.0);
-        char text[1024];snprintf(text,sizeof text,dm_ui("dmAndroidDebugMetrics"),stats.frame_ms>0?1000/stats.frame_ms:0,stats.frame_ms,stats.cpu_ms,gpu,stats.wait_ms,power,stats.draws,stats.passes,stats.submits,stats.snapshot_mb,stats.buffer_mb,pages*sysconf(_SC_PAGESIZE)/1048576.,stage,hud.area,hud.x,hud.y,(unsigned long long)dm_input_samples());
-        jstring value=java_text(env,text);(*env)->CallVoidMethod(env,a->clazz,method,value);(*env)->DeleteLocalRef(env,value);
-        if((*env)->ExceptionCheck(env)){(*env)->ExceptionDescribe(env);(*env)->ExceptionClear(env);break;}
+        // 浮层关掉时整块显示工作都跳过：不查电池、不读 /proc、不拼字符串、不碰 UI 线程。
+        // 但下面的首帧看门狗必须照跑，它跟显示无关。
+        // With the overlay off this whole display block is skipped: no battery query, no /proc read, no string
+        // building, no UI-thread call. The first-frame watchdog below must still run; it is not a display concern.
+        if(overlay){
+            int dm_loadscreen_up(void);const char *stage=dm_ui(keyboard?"dmAndroidStageText":dm_loadscreen_up()?"dmAndroidStageLoading":hud.valid?"dmAndroidStageGame":stats.frame?"dmAndroidStageMenu":"dmAndroidStageBoot");
+            unsigned long pages=0;FILE *memory=fopen("/proc/self/statm","r");if(memory){unsigned long total;fscanf(memory,"%lu %lu",&total,&pages);fclose(memory);}
+            char gpu[32];if(stats.gpu_valid)snprintf(gpu,sizeof gpu,"%.1f",stats.gpu_ms);else snprintf(gpu,sizeof gpu,"--");
+            // 电池读数经框架获取（应用不需要 root）；读不到就明确显示 --，不伪造数值。
+            // Battery readings come from the framework (no root needed); anything unavailable shows "--" rather than a made-up number.
+            char power[160];
+            if(battery_current&&battery_voltage&&battery_level&&battery_status){
+                int milliamps=(*env)->CallIntMethod(env,a->clazz,battery_current);
+                int millivolts=(*env)->CallIntMethod(env,a->clazz,battery_voltage);
+                int capacity=(*env)->CallIntMethod(env,a->clazz,battery_level);
+                int status=(*env)->CallIntMethod(env,a->clazz,battery_status);
+                if((*env)->ExceptionCheck(env)){(*env)->ExceptionDescribe(env);(*env)->ExceptionClear(env);milliamps=-1;}
+                char value[64];
+                if(milliamps<0)snprintf(value,sizeof value,"--");
+                else if(millivolts>0){double volts=millivolts/1000.0;snprintf(value,sizeof value,"%d mA | %.2f V | %.1f W",milliamps,volts,milliamps*volts/1000.0);}
+                else snprintf(value,sizeof value,"%d mA",milliamps);
+                // 本机放电时 HAL 也返回正值，方向不能靠符号判断；充电与否用框架状态（2 充电 / 5 已满）决定。
+                // This HAL reports a positive value while discharging too, so direction comes from the framework status (2 charging / 5 full), not the sign.
+                int charging=status==2||status==5;
+                snprintf(power,sizeof power,dm_ui(charging?"dmAndroidCharging":"dmAndroidPower"),value,capacity<0?0.0:(double)capacity);
+            }else snprintf(power,sizeof power,dm_ui("dmAndroidPower"),"--",0.0);
+            char text[1024];snprintf(text,sizeof text,dm_ui("dmAndroidDebugMetrics"),stats.frame_ms>0?1000/stats.frame_ms:0,stats.frame_ms,stats.cpu_ms,gpu,stats.wait_ms,power,stats.draws,stats.passes,stats.submits,stats.snapshot_mb,stats.buffer_mb,pages*sysconf(_SC_PAGESIZE)/1048576.,stage,hud.area,hud.x,hud.y,(unsigned long long)dm_input_samples());
+            jstring value=java_text(env,text);(*env)->CallVoidMethod(env,a->clazz,method,value);(*env)->DeleteLocalRef(env,value);
+            if((*env)->ExceptionCheck(env)){(*env)->ExceptionDescribe(env);(*env)->ExceptionClear(env);break;}
+        }
         if(i<96&&i%4==0){uint64_t frame=dm_nvn_frame_count();LOG("[android] game progress frame=%llu input_samples=%llu",(unsigned long long)frame,(unsigned long long)dm_input_samples());
             if(frame&&frame==previous&&!keyboard){if(++unchanged==4)crash_dump_now("Android first-frame progress stalled");}else unchanged=0;previous=frame;}
     }
