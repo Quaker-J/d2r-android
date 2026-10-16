@@ -100,12 +100,14 @@ def main():
     licenses.mkdir(exist_ok=True)
     for license_file in (build / "gpu-driver/licenses").glob("*.txt"):
         shutil.copyfile(license_file, licenses / license_file.name)
-    # 本机自备素材（例如自己准备的启动画面背景图）只打进本机 APK，不随源码发布；
-    # dm/android/local/ 已在 .gitignore 里，所以这里拷什么都不会污染仓库。
-    # Machine-local inputs (e.g. a self-supplied launcher backdrop) go into the local APK only. dm/android/local/
-    # is gitignored, so whatever is dropped there cannot leak into the source release.
-    for local_asset in sorted((ROOT / "local").glob("launcher-background.*")):
-        shutil.copyfile(local_asset, assets / local_asset.name)
+    # 启动画面背景图随源码发布（dm/android/artwork/），新电脑 clone 后能重建出同样的 APK。
+    # dm/android/local/ 是可选覆盖（已 gitignore）：想换成自己的图，把同名文件放那儿即可。
+    # The launcher backdrop ships with the source (dm/android/artwork/) so a fresh clone rebuilds the same APK.
+    # dm/android/local/ is an optional gitignored override: drop a same-named file there to use your own image.
+    for artwork in sorted((ROOT / "artwork").glob("launcher-background.*")):
+        shutil.copyfile(artwork, assets / artwork.name)
+    for override in sorted((ROOT / "local").glob("launcher-background.*")):
+        shutil.copyfile(override, assets / override.name)
     # 诊断GLSL缓存独立于游戏的离线Maxwell fullshader缓存，不覆盖游戏资源。
     # Keep diagnostic GLSL shaders separate from the game's offline Maxwell fullshader cache.
     shutil.copytree(build / "gpu-test-shaders", assets / "gpu-test-shaders", dirs_exist_ok=True)

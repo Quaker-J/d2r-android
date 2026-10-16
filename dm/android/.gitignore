@@ -1,6 +1,6 @@
 /build/
 /local.env
 __pycache__/
-# 本机构建素材（例如自己准备的启动画面背景图）：只进本机 APK，不进源码发布。
-# Machine-local build inputs (e.g. a self-supplied launcher backdrop): they go into the local APK only, never the source release.
+# 可选的启动画面背景图覆盖：放同名的 launcher-background.* 进这里就用自己的图，仓库里的 dm/android/artwork/ 版本被覆盖。
+# Optional launcher backdrop override: drop a same-named launcher-background.* here to use your own image instead of the tracked one in dm/android/artwork/.
 /local/

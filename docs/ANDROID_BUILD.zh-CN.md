@@ -62,19 +62,29 @@ adb -s "$ANDROID_SERIAL" install -r dm/android/build/D2R-Android-port.apk
 adb -s "$ANDROID_SERIAL" shell mkdir -p /sdcard/Android/data/org.d2r.android.port/files/romfs
 adb -s "$ANDROID_SERIAL" push ~/dm-work/data/switch/3.3.94012/Update/RomFS/. /sdcard/Android/data/org.d2r.android.port/files/romfs/
 adb -s "$ANDROID_SERIAL" push ~/dm-work/build/android/shaders/spirv /sdcard/Android/data/org.d2r.android.port/files/shaders
-adb -s "$ANDROID_SERIAL" shell am start -n org.d2r.android.port/.D2RActivity
+adb -s "$ANDROID_SERIAL" shell am start -n org.d2r.android.port/.LauncherActivity
 ```
 
 RomFS和着色器仅首次或资源版本变化时部署；更新APK保留应用数据。首次无存档会进入建角界面。存档位于应用私有 `files/save/`，不要用其他设备存档覆盖现有角色。驱动与启动配置见[驱动说明](ANDROID_GPU_DRIVER.zh-CN.md)和[启动设置](ANDROID_LAUNCH_SETTINGS.zh-CN.md)。
 
+## 启动界面
+
+包的入口是 `org.d2r.android.port.LauncherActivity`（Java），游戏本体是它启动的第二个页面 `D2RActivity`（不导出）。清单由 `build.py` 从仓库清单改写而来：替换必须正好命中一个 NativeActivity 块，否则直接报错退出；探针构建没有 dex，所以仍用纯原生清单、不出现 Java 页面。
+
+界面目前可用的设置是调试浮层开关与画面档位（掌机1280×720 / 主机1600×900），点“启动游戏”时写进应用私有 `files/temp/launch-settings.conf`，由 native 严格解析（键白名单、失败即中止启动，且不接受任意路径）。游戏文件与密钥两项**尚未接入**，只如实显示“未设置”。
+
+启动画面背景图随源码发布：`dm/android/artwork/launcher-background.*`，构建时打进 APK 的 `assets/`，所以新电脑 clone 后能重建出同样的 APK。想换自己的图，把同名文件放进 `dm/android/local/`（该目录已 gitignore）即可覆盖，不必改源码。素材明显小于屏幕时代码会先缩小再放大，让放大本身把它柔化成氛围底图；换更大的图就自动变清晰。
+
+构建必须在项目虚拟环境里跑：`build.py` 用 `sys.executable` 派生子进程，而 `patch_nso.py` 需要 venv 里的 `lz4`，用系统 `python3` 会在那一步 `ModuleNotFoundError`。
+
 ## 输入与日志
 
-支持虚拟摇杆、按键、系统键盘命名、键盘和手柄。画面按16:9等比适配，手机两侧可有留白。调试浮层显示FPS、CPU/GPU时间和等待，GPU时间是批次时间跨度，不能与CPU简单相加。
+支持虚拟摇杆、按键、系统键盘命名、键盘和手柄。画面按16:9等比适配，手机两侧可有留白。调试浮层显示FPS、CPU/GPU时间和等待，GPU时间是批次时间跨度，不能与CPU简单相加。浮层还显示电池行：电流、电压、按二者算出的功率和电量；数值来自框架（应用不需要 root），读不到就显示 `--`。浮层可以在启动界面关掉，关掉后调试线程跳过整块显示工作，但首帧卡死检测照常运行。
 
 ```bash
 adb -s "$ANDROID_SERIAL" shell run-as org.d2r.android.port tail -100 files/game.log
 ```
 
-管线缓存位于应用私有 `files/pipeline-cache/`，与存档分离；当前仅验证首次保存，第二次启动加载与收益待验证。
+管线缓存位于应用私有 `files/pipeline-cache/`，与存档分离；驱动缓存的重启加载与逐条预热都已在真机验证（`load=accepted`，预热清单后台重建），当前缺口是首次踏入没去过的地面时该处着色器组合仍会现编。
 
 不带 `--game-run` / `--game-source` 的 `build.py` 构建运行时诊断APK，不能以该诊断画面当作真实游戏运行证据。
