@@ -1,17 +1,21 @@
 # Android 移植进度
 
-更新日期：2026-10-16。此文件随工作更新，是中断后继续移植的入口。
+更新日期：2026-10-17。此文件随工作更新，是中断后继续移植的入口。
 
 English: [ANDROID_PORT_PROGRESS.md](ANDROID_PORT_PROGRESS.md)
 
 ## 当前状态（继续开发先看这里）
 
-**2026-10-16 最新进度：Android 版已能进入营地并移动，稳定阶段接近 60 FPS；卡顿根因确认为"首次使用的管线在创建时现编驱动代码"（单次最高 111.987 ms），"录制真实管线描述 + 下次启动后台回放预热"已完成真机安装并通过受控对照：冷驱动缓存下菜单最坏帧从 957 ms 降到 142 ms、进入营地从 634 ms 降到 98 ms（管线新建 562 ms → 2.5 ms 全命中）；用户实战打怪新增的 18 条特效管线也在下一局预热成功（127 条全部后台建完 447.7 ms）。全场景稳定 60 FPS 尚未达成。以下本节为当前状态，后面的旧版本记录仅供追溯。**
+**2026-10-17 最新进度：新增启动界面与「数据包导入」。玩家在电脑端用 `make_package.py`（或让 AI 读 `.claude/skills/d2r-package` 这个 skill）从自己的游戏文件与密钥生成一个 `d2r-package.zip`；手机端在启动界面导入它，导入完成后点「启动游戏」即可。真机验证通过：选包 → 解包 → 点启动 → 进入主菜单并渲染（截图 FPS 59.3 / 帧 16.9 ms、`vulkan-perf` 60.01–61.44 FPS）。启动界面另有调试浮层开关（浮层现含电池电流/电压/功耗）与画面档位。仓库自带测试长期失败已查明并修好（140 个子用例从 100 失败变全绿，根因是一次提速改动没同步测试）。三个用户报告的问题与「分辨率能否提升」已完成根因调研，结论见「下一步」。以下本节为当前状态，后面的旧版本记录仅供追溯。**
 
 ### 源码和功能
 
 - 私有仓库：[sydeEvans/d2r-android](https://github.com/sydeEvans/d2r-android)。保留上游许可与来源说明，不包含游戏资源、密钥或 APK。
-- 最新已构建和安装的提交：`600c165`（`Record and prewarm Vulkan pipelines to remove first-use compile hitches`）及其后的记账修复（与本文件同批提交），分支 `main`；此前基线提交 `891f596172042a7d2db702e66fb425ca0b6d6102`（`Reduce Android Vulkan frame-time overhead`）。
+- 最新已构建和安装的提交：`fa758de`（启动界面导入数据包并加载），分支 `main`；此前基线提交 `891f596172042a7d2db702e66fb425ca0b6d6102`（`Reduce Android Vulkan frame-time overhead`）。本轮同批落地：`e392a90` 启动界面、`6461a5d` 浮层显示电池功耗、`d99f46a` 上下文入口测试改为当前契约、`c2298ca` 数据包格式与汇编器、`7b8bf06` 打包 CLI 与 skill、`13f7e7d` 启动画面随源码发布。
+- 本轮新增（已真机验证）：数据包导入（`docs/ANDROID_PACKAGE.zh-CN.md` 是格式契约）。电脑端 `make_package.py` 从玩家自己的游戏文件与密钥解包/改写/翻译，产出一个 zip；手机端启动界面选它、解包、再启动游戏。**三个必须记住的约束**：① 模块解到**内部**目录 —— 外部存储是 `noexec` 挂载，从那里 `dlopen` 会失败（实测 `/storage/emulated` 带 `noexec`）；大资源仍在外部目录。② 包里的 RomFS 必须**整个 `data/` 目录**都打进去、不按扩展名筛选 —— 曾经漏掉隐藏文件 `.build.config` 与 `build_key.txt`，游戏报 "TACT Failed to load build config" 后直接返回 `nnMain`，症状像"游戏无故退出"；`ls` 不带 `-a` 对比还会显示"文件完全一致"。③ 分组档位文件 `host-subgroup-size.txt` 必须**随包发布**，运行时在加载驱动前会读它，缺了直接中止启动。
+- 启动界面（`LauncherActivity`）：已导入才允许启动（未导入时入口置灰）、导入时显示百分比、导入是原子的（旧 `manifest.json` 先删、新的最后写，中途失败不会让游戏读到半个包）。调试浮层开关与画面档位写进 `files/temp/launch-settings.conf`，由 native 严格解析（键白名单、失败即中止启动、不接受任意路径）。
+- 调试浮层新增电池行：电流、电压、按二者算出的功率、电量，来自框架（应用不需要 root）；浮层可关，关掉后调试线程跳过整块显示工作，但首帧卡死检测照常。
+- 仓库自带测试 `test_context_entry` 长期失败（140 子用例 100 失败）。根因是一次提速改动把入口快路从"序号校验"简化成"只比 TP"，测试没同步改；测试已改成断言当前契约（并加强：命中路径一条 `msr` 都不许有）。
 - 本轮新增（已真机验证）：Vulkan 管线录制 + 预热（`dm/android/native/nvn_vulkan_warm.inc`）。每次真实创建图形管线后把完整状态（vs/fs 键、通道键、管线键）追加写入应用私有目录的 `pso_vk_user.tsv`；下次启动在初始化末尾开后台线程按清单逐条重建管线（建后即毁，编译结果留在驱动管线缓存），并在第一次进局读取画面处最多等待 15 秒让预热收尾，进局后不再现编。清单带版本与结构尺寸头，不符整份忽略；预热线程只做非致命加载，任何可疑记录跳过，不中断游戏。开关：`DM_PSO_MANIFEST=off` 关预热、`DM_PSO_USER=off` 关记录；与运行期共用同一份创建函数，动态状态（视口/剪裁/混合常量/深度偏置/模板掩码）一律不参与创建，保证预热与游戏命中同一驱动缓存条目。预热线程不记账（`resource_create_quiet`），长帧账目与慢创建日志只反映游戏线程；长帧"新建管线 N 条 + 着色器库 M 个共 X ms"的累计值修复后显示真实值。
 - 当前工作目录：`~/d2r`（2026-10-16 由 `~/dm-work/publish/d2r-android` 迁回；旧开发现场归档于 `~/dm-work/archive/d2r-old-site-20261016`）。源码只在 `~/d2r`，`~/dm-work` 仅存放工具、资源和运行产物；继续开发前应确认目录与分支。
 - 已具备 Vulkan 渲染、AAudio 声音、虚拟摇杆和按键、系统键盘输入、横屏与屏幕适配、帧率及 CPU/GPU 调试信息。
@@ -45,11 +49,17 @@ English: [ANDROID_PORT_PROGRESS.md](ANDROID_PORT_PROGRESS.md)
 
 ### 下一步
 
-1. 计算管线补录：至今计算管线（compute）仍是首次现编（对照 A 局 56.6 ms、B 局 46.4 ms、验证局 26.7 ms）；在录制端加 compute 挂点并扩展清单格式后可一并预热。
-2. 把本机积累的 `pso_vk_user.tsv`（127 条：菜单 + 营地 + 首次打怪特效）整理为仓库种子清单，随构建推送 `DM_VK_SHADERS`，让驱动更新/清数据/新设备直接受益。
-3. 继续定位剩余长帧：21–30 ms 轻超帧的线程 CPU 波动点（常态 12.8 ms，偶发 18–19 ms）、表情轮盘簇、恢复/切场景后簇；不以单张截图替代稳定性结论。
-4. 在新手机部署同一提交，确认显示、触控和实际帧率。
-5. 进度与构建说明已整理提交并推送（2026-10-16），任何电脑 clone 后可按 `docs/ANDROID_BUILD.zh-CN.md` 重建；后续按上方维护约定保持最新。主线保持 Android 优化，LASRecomp 和 Eden 作为渲染实现参考。
+用户报告与被问到的问题都已完成**根因调研**（下面每条都有代码位置）；按「改动小且可验证」到「改动大」排序：
+
+1. **Xbox 方向键不工作 + 接入时应隐藏虚拟摇杆**。方向键的根因：`frontend_activity.c` 的 `input_ready` 只处理 `AXIS_X/Y/Z/RZ/RX/RY`，**完全没有处理 HAT 轴**（全仓 `grep AXIS_HAT` 零命中）；Xbox 手柄在安卓上常把十字键报成 `AXIS_HAT_X/Y`，于是被**静默丢弃**。修法是把 HAT 按阈值转成 `DM_BTN_LEFT/RIGHT/UP/DOWN` 写进 `pad_buttons`（**不是**摇杆轴 —— 游戏把十字键当按钮消费，`dm_input.h` 的位序对齐 Switch Pro）；注意有的手柄 HAT 与 `DPAD_*` 键码双发，两者不能互相清位。隐藏摇杆：可见性现在只看 `activityResumed && hasWindowFocus() && textDialog == null`（`D2RActivity.java` 的 `updateTouchVisibility`），**没有任何手柄检测**；且因为 NativeActivity 把 `AInputQueue` 直接挂到 Looper 消费了事件，Java 层的 `onGenericMotion` **收不到手柄事件** —— 要用 `InputManager.InputDeviceListener`（设备级、不受影响）或"原生检测 → JNI 回调 Java"，并处理拔出时恢复显示。
+2. **切后台后存档可能丢**。事务机制本身可靠（原子换入、写失败拒绝提交、残留工作目录必被丢弃，有测试），漏洞在生命周期：`window_destroyed` → `dm_host_shutdown`（`hle_lifecycle.c`）直接 `_exit(0)`，**退出前不请游戏存盘**。游戏自己的定时存盘是 5 分钟一次，所以最坏丢接近 5 分钟。Mac（`front_mac.m`）与 iOS（`front_ios.m`）都做了"先 `dm_request_save` 再最多等 2–3 秒"，安卓漏了 —— 照抄即可。注意安卓的 `clonefile` 是全量拷贝（`host_posix.c`），存档越大提交越慢，会放大这个窗口。
+3. **切后台再打开游戏就重启**。根因同上：`window_destroyed` 调 `dm_host_shutdown` → `_exit(0)`，而安卓在 Activity 停止时**必然销毁窗口**（`configChanges` 挡不住，那只管旋转）。这是文档早就记下的已知未完成项。暂停/恢复、音频挂起、焦点丢失**都已就绪**，缺的只是"窗口 + 交换链重建保留进程"：让 `window_destroyed` 只清窗口不杀进程，并给 `nvn_vulkan.c` 的表面/交换链/信号量/`screen_images` 加"按新 `ANativeWindow` 重建"的路径（现在这些都只在进程启动时建一次）。属中等改动，但必须真机反复验证。
+4. **分辨率能否提升 —— 能，但不是单纯改大就好**。`front_game_res`（`frontend_activity.c:232`）是唯一的有效源头，硬编码 720p/900p；Mac 与 iOS 的同名函数都读 `DM_GAME_RES` 覆盖，安卓没接（另有两处相同常量：`runtime.c` 的上下文槽默认值、`activity.c` 的触控布局尺寸）。三个必须先知道的限制：① **必须在启动时抬高** —— 窗口贴图按启动时的参数位一次建好，之后只能缩不能放大；② **`DM_3D_SCALE_DYN` 会抵消收益** —— 它缺省开启，掉帧时把 3D 内部比例降到 0.72/0.70，抬分辨率若越过 16.7 ms 预算，3D 世界反而可能比原来更糊（UI/文字会清晰，3D 不一定）；③ 代价**不是简单线性** —— 主线程 CPU 有很大一块与像素无关的固定开销，不能用面积比外推，必须实测。当前 GPU 只用 6.7 ms，1080p 大概率仍在预算内。
+5. 计算管线仍未录制（至今首次现编 26.7–56.6 ms）：在录制端加 compute 挂点并扩展清单格式后可一并预热。
+6. 把本机积累的 `pso_vk_user.tsv`（139 条）整理为仓库种子清单随构建发布，让驱动更新/清数据/新设备直接受益；注意**必须先修掉预热路径遇到可疑记录会 `die()` 的问题**（文档承诺"可疑记录跳过"但未实现），否则等于发布崩溃风险。
+7. 继续定位剩余长帧：21–30 ms 轻超帧的线程 CPU 波动点、表情轮盘簇、恢复/切场景后簇。
+8. 在新手机部署同一提交，确认显示、触控和实际帧率。
+9. 任何电脑 clone 后可按 `docs/ANDROID_BUILD.zh-CN.md` 重建、按 `.claude/skills/d2r-package` 生成数据包；主线保持 Android 优化，LASRecomp 和 Eden 作为渲染实现参考（Eden 的着色器翻译是 GPL-3.0，不能并入本 MIT 项目）。
 
 ## 历史进度（以下版本、端口与待办按当时状态保留）
 
