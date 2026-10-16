@@ -20,10 +20,11 @@ static graphics_layout_entry *graphics_layouts[1024];
 static uint64_t graphics_layout_creations,graphics_pass_creations,graphics_frame_creations;
 static VkPipelineLayout graphics_layout_get(shader_entry *vs,shader_entry *fs) {
     uintptr_t key[2]={(uintptr_t)vs,(uintptr_t)fs};unsigned bucket=graphics_hash(key,sizeof key)&1023;
-    for(graphics_layout_entry *entry=graphics_layouts[bucket];entry;entry=entry->next)if(entry->vs==vs&&entry->fs==fs)return entry->layout;
+    pthread_mutex_lock(&graphics_object_lock);
+    for(graphics_layout_entry *entry=graphics_layouts[bucket];entry;entry=entry->next)if(entry->vs==vs&&entry->fs==fs){VkPipelineLayout layout=entry->layout;pthread_mutex_unlock(&graphics_object_lock);return layout;}
     graphics_layout_entry *entry=calloc(1,sizeof *entry);if(!entry)die("Vulkan graphics layout cache allocation");entry->vs=vs;entry->fs=fs;
     VkDescriptorSetLayout layouts[2]={vs->layout,fs->layout};VkPipelineLayoutCreateInfo info={.sType=VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,.setLayoutCount=2,.pSetLayouts=layouts};
-    VK_CHECK(vkCreatePipelineLayout(device,&info,NULL,&entry->layout));entry->next=graphics_layouts[bucket];graphics_layouts[bucket]=entry;graphics_layout_creations++;return entry->layout;
+    VK_CHECK(vkCreatePipelineLayout(device,&info,NULL,&entry->layout));entry->next=graphics_layouts[bucket];graphics_layouts[bucket]=entry;graphics_layout_creations++;VkPipelineLayout layout=entry->layout;pthread_mutex_unlock(&graphics_object_lock);return layout;
 }
 typedef struct {
     uint32_t attachments,colors,depth,color_indices[8];VkFormat formats[9];uint32_t load[9],stencil_load[9];
@@ -45,11 +46,12 @@ static graphics_pass_key graphics_pass_key_make(unsigned count,unsigned ncolors,
 }
 static graphics_pass_entry *graphics_pass_get(graphics_pass_key key,const VkAttachmentDescription *attachments,const VkAttachmentReference *colors,VkAttachmentReference depth) {
     unsigned bucket=graphics_hash(&key,sizeof key)&255;
-    for(graphics_pass_entry *entry=graphics_passes[bucket];entry;entry=entry->next)if(!memcmp(&entry->key,&key,sizeof key))return entry;
+    pthread_mutex_lock(&graphics_object_lock);
+    for(graphics_pass_entry *entry=graphics_passes[bucket];entry;entry=entry->next)if(!memcmp(&entry->key,&key,sizeof key)){pthread_mutex_unlock(&graphics_object_lock);return entry;}
     graphics_pass_entry *entry=calloc(1,sizeof *entry);if(!entry)die("Vulkan render pass cache allocation");entry->key=key;
     VkSubpassDescription sub={.pipelineBindPoint=VK_PIPELINE_BIND_POINT_GRAPHICS,.colorAttachmentCount=key.colors,.pColorAttachments=colors,.pDepthStencilAttachment=depth.attachment==VK_ATTACHMENT_UNUSED?NULL:&depth};
     VkRenderPassCreateInfo info={.sType=VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,.attachmentCount=key.attachments,.pAttachments=attachments,.subpassCount=1,.pSubpasses=&sub};
-    VK_CHECK(vkCreateRenderPass(device,&info,NULL,&entry->pass));entry->next=graphics_passes[bucket];graphics_passes[bucket]=entry;graphics_pass_creations++;return entry;
+    VK_CHECK(vkCreateRenderPass(device,&info,NULL,&entry->pass));entry->next=graphics_passes[bucket];graphics_passes[bucket]=entry;graphics_pass_creations++;pthread_mutex_unlock(&graphics_object_lock);return entry;
 }
 static graphics_frame_entry *graphics_frame_get(graphics_pass_entry *pass,const VkImageView *views,image_entry *const *images,uint32_t width,uint32_t height) {
     graphics_frame_key key={.pass=pass,.width=width,.height=height};memcpy(key.views,views,pass->key.attachments*sizeof *views);unsigned bucket=graphics_hash(&key,sizeof key)&1023;

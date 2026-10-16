@@ -12,6 +12,9 @@ typedef struct shader_entry {
 static void graphics_probe_cs_inputs(const struct shader_entry *shader,const VkWriteDescriptorSet *writes,uint32_t count);
 static void graphics_probe_cs_outputs(const struct shader_entry *shader);
 static shader_entry *shader_list;
+// 提交线程与预热线程共享着色器/通道/布局表；这把锁串行化表的增查，预热对象因此直接进入运行期缓存。
+// The submit and warm threads share the shader/pass/layout tables; this lock serializes table access so warmed objects land directly in the runtime caches.
+static pthread_mutex_t graphics_object_lock=PTHREAD_MUTEX_INITIALIZER;
 // 只计真实创建，缓存命中不读时钟；每类每60帧最多4条慢创建明细。
 // Time actual creation only, never cache hits; cap slow details at four per category per 60 frames.
 typedef struct resource_create_start {uint64_t wall,cpu;} resource_create_start;
@@ -55,6 +58,14 @@ static void *read_shader_file(const char *key,const char *suffix,size_t *size) {
     char path[1024];snprintf(path,sizeof path,"%s/%s.%s",dir,key,suffix);FILE *f=fopen(path,"rb");if(!f)die("Missing Vulkan shader %s",path);
     if(fseek(f,0,SEEK_END))die("Shader seek");long n=ftell(f);if(n<0||n>32*1024*1024)die("Shader size");rewind(f);void *data=malloc(n);if(!data||fread(data,1,n,f)!=(size_t)n)die("Shader read");fclose(f);*size=n;return data;
 }
+// 预热路径的非致命读取：清单可能引用已不在本机着色器缓存里的键，缺失按跳过处理。
+// Non-fatal read for the warm path: manifests may reference keys no longer present in the local shader cache; missing files are skipped.
+static void *read_shader_file_opt(const char *key,const char *suffix,size_t *size) {
+    shader_profile_check();
+    const char *dir=getenv("DM_VK_SHADERS");if(!dir)return NULL;
+    char path[1024];snprintf(path,sizeof path,"%s/%s.%s",dir,key,suffix);FILE *f=fopen(path,"rb");if(!f)return NULL;
+    if(fseek(f,0,SEEK_END)){fclose(f);return NULL;}long n=ftell(f);if(n<0||n>32*1024*1024){fclose(f);return NULL;}rewind(f);void *data=malloc(n?n:1);if(!data||fread(data,1,n,f)!=(size_t)n){free(data);fclose(f);return NULL;}fclose(f);*size=n;return data;
+}
 static VkDescriptorType descriptor_type(const shader_binding *b) {
     if(b->kind<=1)return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     if(b->kind==2)return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -63,14 +74,20 @@ static VkDescriptorType descriptor_type(const shader_binding *b) {
     if(b->separate)return (b->type&255)==0?VK_DESCRIPTOR_TYPE_SAMPLER:VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     return VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 }
-static shader_entry *shader_get(const void *control) {
-    uint8_t hash[32];dm_android_sha256_context ctx;dm_android_sha256_init(&ctx);dm_android_sha256_update(&ctx,control,0x880);dm_android_sha256_final(hash,&ctx);char key[17];for(int i=0;i<8;i++)snprintf(key+i*2,3,"%02x",hash[i]);
-    for(shader_entry *s=shader_list;s;s=s->next)if(!strcmp(s->key,key))return s;
+static shader_entry *shader_load_by_key(const char *key,int stats,int fatal) {
+    pthread_mutex_lock(&graphics_object_lock);
+    for(shader_entry *s=shader_list;s;s=s->next)if(!strcmp(s->key,key)){pthread_mutex_unlock(&graphics_object_lock);return s;}
     resource_create_start creation=resource_create_begin();
-    size_t bytes;uint32_t *meta=read_shader_file(key,"meta",&bytes);
-    if(bytes<28||memcmp(meta,"DMVK",4)||meta[1]!=1||meta[4]>256||meta[5]>65536||meta[6]!=32||bytes!=28+meta[4]*40+meta[5]+128)die("Invalid Vulkan reflection %s",key);
+    size_t bytes;uint32_t *meta=fatal?read_shader_file(key,"meta",&bytes):read_shader_file_opt(key,"meta",&bytes);
+    if(!meta){pthread_mutex_unlock(&graphics_object_lock);return NULL;}
+    if(bytes<28||memcmp(meta,"DMVK",4)||meta[1]!=1||meta[4]>256||meta[5]>65536||meta[6]!=32||bytes!=28+meta[4]*40+meta[5]+128){
+        if(fatal)die("Invalid Vulkan reflection %s",key);
+        free(meta);pthread_mutex_unlock(&graphics_object_lock);return NULL;
+    }
+    void *code=fatal?read_shader_file(key,"spv",&bytes):read_shader_file_opt(key,"spv",&bytes);
+    if(!code){free(meta);pthread_mutex_unlock(&graphics_object_lock);return NULL;}
     shader_entry *s=calloc(1,sizeof *s);if(!s)die("Vulkan shader allocation");strcpy(s->key,key);s->stage=meta[2];s->set=meta[3];s->count=meta[4];s->c1_size=meta[5];s->bindings=(void*)(meta+7);s->c1=(uint8_t*)s->bindings+s->count*40;memcpy(s->attributes,s->c1+s->c1_size,128);
-    void *code=read_shader_file(key,"spv",&bytes);VkShaderModuleCreateInfo mi={.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,.codeSize=bytes,.pCode=code};VK_CHECK(vkCreateShaderModule(device,&mi,NULL,&s->module));free(code);
+    VkShaderModuleCreateInfo mi={.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,.codeSize=bytes,.pCode=code};VK_CHECK(vkCreateShaderModule(device,&mi,NULL,&s->module));free(code);
     // 反射与 shader 同寿命；只预计算布局和索引，不缓存动态资源地址或工作区指针。
     // Reflection lives with the shader; precompute only layout and indices, never dynamic resource addresses or scratch pointers.
     if(s->count){s->binding_plan=calloc(s->count,sizeof *s->binding_plan);if(!s->binding_plan)die("Vulkan shader binding plan allocation");}
@@ -87,7 +104,15 @@ static shader_entry *shader_get(const void *control) {
         }
         bindings[i]=(VkDescriptorSetLayoutBinding){.binding=b->binding,.descriptorType=p->type,.descriptorCount=b->count,.stageFlags=VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT|VK_SHADER_STAGE_COMPUTE_BIT};
     }
-    VkDescriptorSetLayoutCreateInfo li={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,.bindingCount=s->count,.pBindings=bindings};VK_CHECK(vkCreateDescriptorSetLayout(device,&li,NULL,&s->layout));s->next=shader_list;shader_list=s;resource_create_end(0,creation,s->key,NULL);LOG("[vulkan] shader %s stage=%u bindings=%u",s->key,s->stage,s->count);return s;
+    VkDescriptorSetLayoutCreateInfo li={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,.bindingCount=s->count,.pBindings=bindings};VK_CHECK(vkCreateDescriptorSetLayout(device,&li,NULL,&s->layout));s->next=shader_list;shader_list=s;
+    pthread_mutex_unlock(&graphics_object_lock);
+    if(stats)resource_create_end(0,creation,s->key,NULL);LOG("[vulkan] shader %s stage=%u bindings=%u",s->key,s->stage,s->count);return s;
+}
+// 运行期入口：控制块哈希出键，命中共享表或走致命加载；预热入口按清单键非致命加载。
+// Runtime entry: hash the control block to a key, then hit the shared table or load fatally; the warm entry loads non-fatally by manifest key.
+static shader_entry *shader_get(const void *control) {
+    uint8_t hash[32];dm_android_sha256_context ctx;dm_android_sha256_init(&ctx);dm_android_sha256_update(&ctx,control,0x880);dm_android_sha256_final(hash,&ctx);char key[17];for(int i=0;i<8;i++)snprintf(key+i*2,3,"%02x",hash[i]);
+    return shader_load_by_key(key,1,1);
 }
 // ProgramSetShaders 每次生成新序号；按程序地址及序号复用解析，防地址重用返回旧着色器。
 // ProgramSetShaders generates a new serial every time; cache resolution by program address/serial so reused addresses cannot return old shaders.

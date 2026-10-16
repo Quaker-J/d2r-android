@@ -35,6 +35,7 @@ static uint64_t read_cache_bytes, read_cache_clock, read_cache_hits, read_cache_
 static void read_cache_remove(uintptr_t address, uint64_t size);
 static void snapshot_diag_poll(void);
 static void gpu_snapshot_report(void);
+static void pso_warm_start(void);
 static unsigned batch_draws;
 static void descriptor_reset(void);
 static void batch_resources_select(unsigned slot);
@@ -318,6 +319,9 @@ driver_retry:;
         for(unsigned i=0;i<screen_count;i++)VK_CHECK(vkCreateSemaphore(device,&sem,NULL,&screen_present_wait[i]));
         LOG("[vulkan] Android game surface %ux%u images=%u", screen_extent.width, screen_extent.height, screen_count);
     }
+    // 最后启动后台管线预热：读本机积累与随包种子清单，把首次驱动编译从游戏内挪到启动/读取画面（nvn_vulkan_warm.inc）。
+    // Start background pipeline warm-up last: read the local accumulation and the shipped seed manifest, moving first driver compilations from gameplay to start-up / the loading screen (nvn_vulkan_warm.inc).
+    pso_warm_start();
 }
 void mtl_init(void) { pthread_once(&once, initialize); }
 
@@ -937,7 +941,14 @@ int mtl_display_hz(void) {
 int mtl_has_window(void) { return surface != VK_NULL_HANDLE; }
 int mtl_link_active(void) { return 0; }
 int mtl_link_wait_tick(uint64_t timeout) { (void)timeout; return 0; }
-int mtl_warm_wait(int timeout) { (void)timeout; return 0; }
+int mtl_warm_wait(int timeout) {
+    // hle_nvn 在第一次进局读取画面处调用：预热没跑完就在这里等（读取画面多停一会儿），进局后不再现编管线。
+    // Called by hle_nvn at the first run-entry loading screen: wait for warm-up here (the loading screen stays a bit longer) so pipelines are not compiled on the fly after entering the run.
+    if(!atomic_load(&pso_warm_running))return 0;
+    uint64_t start=dm_android_clock_ns(CLOCK_MONOTONIC),limit=(uint64_t)(timeout>0?timeout:0)*1000000ull;
+    while(atomic_load(&pso_warm_running)&&dm_android_clock_ns(CLOCK_MONOTONIC)-start<limit)usleep(2000);
+    return (int)((dm_android_clock_ns(CLOCK_MONOTONIC)-start)/1000000ull)+1;
+}
 double mtl_presented_time(uint64_t n) { (void)n; return 0; }
 void mtl_set_frame(uint64_t frame) { (void)frame; }
 void mtl_ub_present(double interval) { (void)interval; }
