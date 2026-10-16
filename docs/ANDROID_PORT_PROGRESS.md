@@ -15,6 +15,9 @@ The Android port enters Act I camp and moves; the stable phase approaches 60 FPS
 - Observed on the tablet (OPPO OPD2409): stationary camp screenshot 60.0 FPS (CPU 7.7 ms, GPU 7.4 ms; two consecutive 120-frame windows with no frame over 33 ms); camp movement screenshot 58.2 FPS, ten 60-frame windows at 59.38-60.69 FPS. One first-time pipeline compile took 111.987 ms (frame 109872, 26 `[vulkan-create-slow]` entries in total, all genuine cache-miss creation). The former 91.010 ms long frame is explained: frame 110574 was two pipeline compiles (38.5 + 31.8 ms) plus 4 ms of shader loading. Of 3126 long frames, ~95% are light 21-30 ms overshoots (thread CPU occasionally spiking to 18-19 ms and missing one vsync); the emote-wheel cluster (248/193 ms with only 4.2/22.8 ms submit+present) and the post-resume/scene-change cluster remain unexplained.
 - Warm-up A/B (driver-cache blob deleted, identical action sequence; A additionally had the manifest moved away): A — 26 `[vulkan-create-slow]` (up to 117.9 ms), worst menu frames 957.2 ms (30 pipelines / 826.0 ms of creation) and 561.9 ms, run entry 633.6 ms (32 / 562.0 ms), walking 140.5/89.3 ms. B (109 records warmed) — no render-thread graphics compiles; menu 141.8 ms (30 / 52.1 ms), run entry 98.0 ms (28 / 2.5 ms, all hits), no camp frame over 46.8 ms; the warm thread built all 109 in 2114.0 ms in the background (frame 1 stayed 26.2 ms). During real play 18 first-kill effect pipelines compiled on demand (hitch clusters 119.1/103.3/102.7/102.1/99.4 ms); they were recorded, and the next launch warmed all 127 in 447.7 ms — the only slow creation left is one compute pipeline (26.7 ms; compute is not recorded yet). The warm thread no longer feeds the long-frame accounting or the slow-create log (`resource_create_quiet`), and the long-frame "N pipelines / M shader libs / X ms" totals now show real values.
 - This round's new warm-up (installed and verified): `dm/android/native/nvn_vulkan_warm.inc` records every genuine graphics pipeline creation to a private `pso_vk_user.tsv` (vs/fs keys, pass key, pipeline key) and, at the end of initialization on the next launch, rebuilds them on a background thread (create then destroy, leaving the compilation in the driver pipeline cache), waiting at most 15 s at the first run-entry loading screen. Manifests carry a version/struct-size header and are ignored wholesale on mismatch; the warm thread only ever loads non-fatally and skips suspicious records. Switches: `DM_PSO_MANIFEST=off` disables warm-up, `DM_PSO_USER=off` disables recording. Runtime and warm-up share one creation function, so dynamic state (viewport/scissor/blend constants/depth bias/stencil masks) never enters the pipeline and both hit the same driver cache entry.
+- Driver pipeline cache restart loading is confirmed on device (re-verified 2026-10-16): `load=accepted bytes=1739369`, followed by `[vulkan-pso-warm] start records=127` → `done built=127 skipped=0 wall_ms=447.7` in the background. In the same session the 30 menu graphics pipelines that used to cost 826 ms of on-demand compilation were created in 1.1 ms total (41 pipeline creations over one 60-frame window summed to 0.697 ms), i.e. the whole cost moved into the driver cache.
+- Measured limit of the current warm-up (2026-10-16, same session): ground the player has not visited still compiles on first use. Walking west into the cart area produced two frames of 102.6 ms and 101.2 ms whose cost was a single `vkCreateGraphicsPipelines` each (wall 85.103 / 85.263 ms, thread CPU 84.605 / 84.526 ms, i.e. pure CPU inside the driver rather than a GPU wait). Walking the same route back produced 11 long frames with a 29.4 ms maximum and none over 33 ms.
+- Camp segment across standing and walking (2026-10-16): 151 consecutive 120-frame windows (18,120 frames), 142 with no frame over 33 ms. The nine that did overshoot are: three during the save load (worst 200.9 ms, thread CPU 149.8 ms), one submission-queue wait (92.6 ms, ring 71.5 ms + worker 71.7 ms), three on first visits to new ground (the compile frames above), and two ordinary light overshoots (37.7 ms worst, zero pipeline creations).
 - Rebuildability (verified 2026-10-16): a fresh clone at `891f596` rebuilt end to end via `docs/ANDROID_BUILD.md`; the three generated tables and the rewritten `libdmguest_main/sdk/subsdk0.so` are byte-identical to the existing artifacts, and the production APK builds successfully (about 4 min 47 s). Evidence: `~/dm-work/research/android-repro-verify/`.
 - Next steps: record compute pipelines too (still first-use compiles: 56.6/46.4/26.7 ms observed); package the 127 accumulated records as a shipped seed manifest (`pso_vk_manifest.tsv` pushed to `DM_VK_SHADERS`) so driver updates or fresh devices benefit immediately; keep hunting the remaining long frames (light 21-30 ms overshoots, emote wheel, post-resume cluster); deploy to the second phone; keep this file current.
 
@@ -49,16 +52,16 @@ The Chinese file is the authoritative per-round record; the sections below are o
 - Tool installation log: `~/dm-work/tools/android-bootstrap.log`.
 - Complete RomFS: 46 files / 8,973,547,258 bytes deployed to `/sdcard/Android/data/org.d2r.android.port/files/romfs/`.
 - Device boot probe: `/data/local/tmp/d2r-port/`, with `game/`, `temp/`, and isolated `probe-save/`.
-- Real host executable: `dm/android/build/host/dmhost-android`, built with `tools/host_link.py`.
+- Real host executable: `dm/android/build/host/dmhost-android`, built with `dm/android/tools/host_link.py`.
 - Logs: `~/dm-work/tools/android-{build,tests,host-boot,romfs-push}.log`.
 
 ## Implemented and validated
 
 - `dm/android/` with generated outputs and local settings ignored.
-- `tools/bootstrap.py`: external installation of NDK r28c, API 35 platform, build-tools 35, ADB, and JDK 17 using ranged downloads. Official tool archive checksums are checked; game checksums are not.
+- `dm/android/tools/bootstrap.py`: external installation of NDK r28c, API 35 platform, build-tools 35, ADB, and JDK 17 using ranged downloads. Official tool archive checksums are checked; game checksums are not.
 - `patch_nso.py`: opt-in `DM_TARGET=android` obtains dynamic TLS context through a full-register-preserving entry, retaining the default Apple route.
 - Opt-in `DM_ALLOW_PREPATCHED=1` accepts exactly the new bytes of the same registered patch; unknown bytes still fail.
-- `tools/guest_elf.py`: 16 KB-aligned ELF libraries preserving the rewritten module layout and exporting `dm_guest_image`.
+- `dm/android/tools/guest_elf.py`: 16 KB-aligned ELF libraries preserving the rewritten module layout and exporting `dm_guest_image`.
 - `native/runtime.[ch]`: dynamic TLS context, module loading/key pages, and four-thread isolation test.
 - NativeActivity lifecycle and multitouch wired to the existing pure C touch state machine.
 - Actual Vulkan diagnostic renderer and swapchain, not yet game NVN playback.
@@ -80,7 +83,7 @@ The Chinese file is the authoritative per-round record; the sections below are o
 - Original lifecycle HLE passed SIGTERM ordering and its 1.5-second stalled-shutdown fallback.
 - An actual write-protection fault validated Linux ucontext PC/SP, ESR WnR and resumed execution.
 - Portable MD5/SHA1/SHA256 passed 36 reference comparisons against Python hashlib.
-- `tools/test.py` is the unified repeatable test entry point.
+- `dm/android/tools/test.py` is the unified repeatable test entry point.
 
 The initial APK is installed and running. The game is not running; the screen explicitly says GAME BACKEND PENDING.
 

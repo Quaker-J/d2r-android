@@ -2,7 +2,7 @@
 
 The maintained step-by-step instructions are in [README.zh-CN.md](ANDROID_BUILD.zh-CN.md). See the repository [status](../README.md) and [snapshot boundaries](ANDROID_RELEASE_SNAPSHOT.zh-CN.md).
 
-Build on Linux x86_64 using `tools/bootstrap.py` (NDK r28c, API35, JDK), then install Python dependencies in a virtual environment: `lz4 capstone unicorn numpy pillow zstandard nsz`. Tools default to `~/dm-work/tools/android`; override with `DM_ANDROID_TOOLS`.
+Build on Linux x86_64 using `python3 dm/android/tools/bootstrap.py` (NDK r28c, API35, JDK), then install Python dependencies in a virtual environment: `lz4 capstone unicorn numpy pillow zstandard nsz`. Tools default to `~/dm-work/tools/android`; override with `DM_ANDROID_TOOLS`. The build also fetches its pinned `libadrenotools`/`liblinkernsbypass` sources; see [GPU driver notes](ANDROID_GPU_DRIVER.zh-CN.md) for the caches and overrides.
 
 Prepare your own RomFS, rewritten `main`, `sdk` and `subsdk0` modules, and a matching SPIR-V cache. The repository provides `extract_packages.py`, `patch_nso.py` with `DM_TARGET=android`, and `build_shaders.py`; it does not distribute game data, keys or the generated artifacts. Shader translation additionally requires a .NET 10 SDK (default `~/dm-work/tools/dotnet/dotnet`, installable with the official dotnet-install script; the first NuGet restore needs network).
 
@@ -25,4 +25,4 @@ Output: `dm/android/build/D2R-Android-port.apk`. It includes locally derived gam
 
 Touch controls, gamepads, keyboard input, native name entry, AAudio and a performance overlay are implemented. The display preserves the game's aspect ratio. Logs are readable with `adb -s DEVICE shell run-as org.d2r.android.port tail -100 files/game.log`.
 
-The current source includes private `files/pipeline-cache` persistence, with the first write verified but restart loading/benefits still unverified. Diagnostic/test sources remain available; no new tests were added or run during publication preparation.
+The current source includes private `files/pipeline-cache` persistence and cross-launch pipeline warm-up (`dm/android/native/nvn_vulkan_warm.inc`). Both are verified on device: the driver cache reloads (`load=accepted`) and a 127-record manifest warmed in 447.7 ms in the background. First use of a shader combination in ground the player has not visited still compiles on demand. Diagnostic/test sources remain available; no new tests were added or run during publication preparation.
