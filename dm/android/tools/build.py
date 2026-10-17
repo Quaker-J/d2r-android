@@ -62,12 +62,41 @@ def build_counter_timestamp(build):
         header.write_text(text)
 
 
+# APK 的版本必须能区分构建。写死的版本名会让系统把两个不同构建当成同一个版本（覆盖安装只提示"重新安装"），
+# 玩家也无从看出自己装的是哪一版。版本由构建时给入，CI 用 tag 名（发布）或 main-<短提交>（分支构建）。
+# The APK version has to tell builds apart. A hardcoded version name makes the system treat two different builds as
+# one version (an overwrite install then reads as "reinstall") and leaves the player unable to see which build they
+# have. It is supplied at build time: the tag name for a release, main-<short commit> for a branch build.
+def version_name(version):
+    """版本名：去掉前导 v 加本移植后缀，例如 v0.3 -> 0.3-android-port。"""
+    return version.removeprefix("v") + "-android-port"
+
+
+def version_code(version):
+    """版本号折成整数：v0.3 -> 300，v1.2.3 -> 10203。
+
+    只有 v<数字> 这种形式才折；分支构建（main-<短提交>）固定为 1 —— Android 拒绝版本号**倒退**的安装，
+    而按提交折出来的数字可大可小，会把正常安装挡掉。版本号相同是允许覆盖的。
+    Only a v<digits> form is folded. Branch builds stay at 1: Android refuses an install whose version code goes
+    backwards, and a commit-derived number moves in either direction, which would block a normal install.
+    Installing over the same version code is allowed.
+    """
+    if not re.fullmatch(r"v?\d+(\.\d+)*", version):
+        return 1
+    numbers = [int(part) for part in version.removeprefix("v").split(".")]
+    while len(numbers) < 3:
+        numbers.append(0)
+    return numbers[0] * 10000 + numbers[1] * 100 + numbers[2]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--install", action="store_true")
     parser.add_argument("--game-source", type=Path, help="Local rewritten Android game modules (includes game code in APK)")
     parser.add_argument("--game-run", action="store_true", help="Run the real game host with NVN/Vulkan instead of the diagnostic frontend")
     parser.add_argument("--shader-cache", type=Path, default=Path.home() / "dm-work/build/android/shaders/spirv")
+    parser.add_argument("--version", default="dev",
+                        help="写进 APK 的版本：发布用 tag 名（v0.3），分支构建用 main-<短提交>；默认 dev")
     args = parser.parse_args()
     if args.game_source and not args.game_run: parser.error("--game-source only makes sense with --game-run")
     if args.game_run and not args.game_source:
@@ -170,7 +199,15 @@ def main():
         # Declare the game category only for the playable application, not the probe.
         source = (ROOT / "AndroidManifest.xml").read_text()
         source = source.replace('android:hasCode="false"', 'android:hasCode="true" android:appCategory="game"')
-        source = source.replace('0.1-runtime-probe', '0.2-android-port')
+        # 版本写进清单：名字给人看，号码给系统判断升级。两处都要求恰好替换一次，清单改了会立刻报错。
+        # The version goes into the manifest: the name is for people, the code is what the system compares for an
+        # upgrade. Both must replace exactly once, so a change to the manifest fails loudly instead of silently.
+        source, named = re.subn(r'android:versionName="[^"]*"',
+                                'android:versionName="%s"' % version_name(args.version), source, count=1)
+        source, coded = re.subn(r'android:versionCode="[^"]*"',
+                                'android:versionCode="%d"' % version_code(args.version), source, count=1)
+        if (named, coded) != (1, 1):
+            sys.exit("game manifest: expected exactly one versionName and one versionCode")
         source, replaced = re.subn(r'<activity android:name="android\.app\.NativeActivity".*?</activity>',
                                    LAUNCHER_ACTIVITY_BLOCK + GAME_ACTIVITY_BLOCK, source, count=1, flags=re.S)
         if replaced != 1: sys.exit("game manifest: expected exactly one NativeActivity activity block")

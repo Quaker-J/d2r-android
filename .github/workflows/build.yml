@@ -57,11 +57,24 @@ jobs:
       - name: 可移植检查（字面量、中英表、输入映射、启动设置、存档包、仓库卫生）
         run: python3 dm/android/tools/ci_checks.py
 
+      # 版本要能区分构建：推 tag 时用 tag 名（发布），分支构建用 main-<短提交>。
+      # 写死的版本名会让系统把两个构建当成同一个版本，覆盖安装只会提示"重新安装"。
+      # The version must tell builds apart: the tag name for a release, main-<short commit> for a branch build.
+      # A hardcoded version name made the system treat two builds as one, so an overwrite install read as "reinstall".
+      - name: 计算版本
+        id: version
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=main-$(git rev-parse --short=8 HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: 构建通用 APK
-        run: python3 dm/android/tools/build.py --game-run
+        run: python3 dm/android/tools/build.py --game-run --version "${{ steps.version.outputs.value }}"
 
       - name: 组装打包套件
-        run: python3 dm/android/tools/make_kit.py --version "${GITHUB_REF_NAME:-dev}"
+        run: python3 dm/android/tools/make_kit.py --version "${{ steps.version.outputs.value }}"
 
       - name: 上传制品
         uses: actions/upload-artifact@v4
