@@ -62,7 +62,7 @@ description: 用玩家自己的游戏文件和密钥生成一个可导入的 And
 导入会解到应用外部私有目录的 `d2r-package/`，**解完最后才写 `manifest.json`**，所以中途失败不会让游戏读到半个包。
 游戏启动时按"有没有 manifest.json"决定用导入的数据还是回落到默认位置。
 
-### 用 adb 直接装到手机（能连上数据线或无线调试时，先问用户愿不愿意）
+### 用 adb 推到手机（能连上数据线或无线调试时，先问用户愿不愿意）
 
 玩家下载到的套件（`d2r-package-kit-*.zip`）根目录里就有 `D2R-Android-port.apk`；
 在仓库里工作时它是 `dm/android/build/D2R-Android-port.apk`。确认其中哪一个存在后用：
@@ -70,13 +70,26 @@ description: 用玩家自己的游戏文件和密钥生成一个可导入的 And
 ```bash
 # 1) 让用户在手机上开「开发者选项 → USB 调试」（或「无线调试」并给出配对码），然后确认连接：
 adb devices                      # 出现 unauthorized 就让用户在手机上点「允许」
-# 2) 安装应用（这个 APK 不含游戏代码，游戏数据由下面的包提供）：
-adb install -r <上面确认过的 APK 路径>
+# 2) 把 APK 放到手机能被文件管理器看到的位置 —— **不要**在这里 adb install，原因见下：
+adb push <上面确认过的 APK 路径> /sdcard/Download/D2R-Android-port.apk
 # 3) 把数据包推到手机（文件选择器能看到的位置）：
 adb push <包路径> /sdcard/Download/d2r-package.zip
 # 4) 打开启动界面，剩下的由用户在手机上点：
 adb shell am start -n org.d2r.android.port/.LauncherActivity
 ```
+
+第 2 步之后，请用户在手机的**「文件 → 下载」**里点那个 APK，走系统自己的安装界面
+（ColorOS 上会先出现厂商的安装引导页，点「继续安装」→「完成」）。
+
+**为什么不让 adb 直接装**：部分厂商（实测 OPPO/ColorOS）**主动拦截 adb 安装**，
+日志里写的是 `OplusPackageInstallInterceptManager: OPLUS_ADB_INSTALL_CANCEL`、
+会话以 `failed: -99` 结束 —— 这与 APK 本身无关，是厂商策略（只允许用户亲手确认安装）。
+在此机型上 `adb install` 无论重试多少次都不会成功，`settings put global adb_enabled 1` 也不改变它；
+把 APK 交给用户在文件管理器里点，是这台机器上唯一走过的路。
+
+**也不要**让用户从**浏览器 / 网盘的下载列表**里直接点安装：那是安卓的"流式安装"
+（界面是 `com.android.packageinstaller/InstallStaging`），系统把下载当一条流递给安装器，
+下到一半或来源不对就会报「解析程序包时出现问题」。要落在**文件**里，成为一个完整文件之后再点它。
 
 第 4 步之后，请用户在启动界面点「导入数据包」→ 选 `Download/d2r-package.zip` → 导入完成后点「启动游戏」。
 **最后这两下必须由用户在手机上点**：系统文件选择器不接受 adb 代选，包要由用户选一次，应用才会把它原子换入。
