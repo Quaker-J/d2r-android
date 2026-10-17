@@ -165,7 +165,11 @@ static int pso_warm_one(const pso_record *record) {
     for(unsigned i=0;i<pass_key->attachments;i++)attachments[i]=(VkAttachmentDescription){.format=pass_key->formats[i],.samples=VK_SAMPLE_COUNT_1_BIT,.loadOp=pass_key->load[i],.storeOp=VK_ATTACHMENT_STORE_OP_STORE,.stencilLoadOp=pass_key->stencil_load[i],.stencilStoreOp=i==pass_key->depth?VK_ATTACHMENT_STORE_OP_STORE:VK_ATTACHMENT_STORE_OP_DONT_CARE,.initialLayout=VK_IMAGE_LAYOUT_GENERAL,.finalLayout=VK_IMAGE_LAYOUT_GENERAL};
     for(unsigned i=0;i<pass_key->colors;i++)colors[i]=(VkAttachmentReference){pass_key->color_indices[i],VK_IMAGE_LAYOUT_GENERAL};
     if(pass_key->depth!=VK_ATTACHMENT_UNUSED)depth.attachment=pass_key->depth;
-    graphics_pass_entry *pass=graphics_pass_get(*pass_key,attachments,colors,depth);
+    graphics_pass_entry *pass=graphics_pass_get(*pass_key,attachments,colors,depth,0);
+    // 驱动拒绝这个通道（多半是记录里的附件格式在这个设备/驱动上不合法）：跳过这条记录，不打断整个预热。
+    // The driver rejected this pass (usually an attachment format in the record that is illegal on this device/driver):
+    // skip that record without interrupting the whole warm-up.
+    if(!pass)return 0;
     VkPipelineLayout layout=graphics_layout_get(vs,fs);
     VkPipeline pipeline=VK_NULL_HANDLE;
     uint64_t begin=dm_android_clock_ns(CLOCK_MONOTONIC);

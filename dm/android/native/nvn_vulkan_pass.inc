@@ -44,14 +44,23 @@ static graphics_pass_key graphics_pass_key_make(unsigned count,unsigned ncolors,
     for(unsigned i=0;i<count;i++){key.formats[i]=attachments[i].format;key.load[i]=attachments[i].loadOp;key.stencil_load[i]=attachments[i].stencilLoadOp;}
     for(unsigned i=0;i<ncolors;i++)key.color_indices[i]=colors[i].attachment;return key;
 }
-static graphics_pass_entry *graphics_pass_get(graphics_pass_key key,const VkAttachmentDescription *attachments,const VkAttachmentReference *colors,VkAttachmentReference depth) {
+static graphics_pass_entry *graphics_pass_get(graphics_pass_key key,const VkAttachmentDescription *attachments,const VkAttachmentReference *colors,VkAttachmentReference depth,int fatal) {
     unsigned bucket=graphics_hash(&key,sizeof key)&255;
     pthread_mutex_lock(&graphics_object_lock);
     for(graphics_pass_entry *entry=graphics_passes[bucket];entry;entry=entry->next)if(!memcmp(&entry->key,&key,sizeof key)){pthread_mutex_unlock(&graphics_object_lock);return entry;}
     graphics_pass_entry *entry=calloc(1,sizeof *entry);if(!entry)die("Vulkan render pass cache allocation");entry->key=key;
     VkSubpassDescription sub={.pipelineBindPoint=VK_PIPELINE_BIND_POINT_GRAPHICS,.colorAttachmentCount=key.colors,.pColorAttachments=colors,.pDepthStencilAttachment=depth.attachment==VK_ATTACHMENT_UNUSED?NULL:&depth};
     VkRenderPassCreateInfo info={.sType=VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,.attachmentCount=key.attachments,.pAttachments=attachments,.subpassCount=1,.pSubpasses=&sub};
-    VK_CHECK(vkCreateRenderPass(device,&info,NULL,&entry->pass));entry->next=graphics_passes[bucket];graphics_passes[bucket]=entry;graphics_pass_creations++;pthread_mutex_unlock(&graphics_object_lock);return entry;
+    // 驱动可能因为格式或组合非法而拒绝这个通道。运行期（fatal=1）的通道来自真实贴图，拒绝就是真 bug，照旧大声退出；
+    // 预热路径（fatal=0）的通道来自清单 —— 记录可能损坏、也可能来自别人的机器，拒绝只说明"这条记录不该预热"，
+    // 丢弃它即可。与 graphics_pipeline_create 同一约定，不另造一套错误处理。
+    // The driver may reject this pass for an illegal format or combination. At runtime (fatal=1) the pass comes from
+    // real textures, so a rejection is a genuine bug and still exits loudly. On the warm path (fatal=0) it comes from
+    // a manifest whose records may be damaged or written on another machine, and a rejection only means "this record
+    // must not be warmed" -- drop it. Same convention as graphics_pipeline_create, not a second one.
+    VkResult created=vkCreateRenderPass(device,&info,NULL,&entry->pass);
+    if(created!=VK_SUCCESS){free(entry);pthread_mutex_unlock(&graphics_object_lock);if(!fatal)return NULL;die("Vulkan render pass create failed: %d",(int)created);}
+    entry->next=graphics_passes[bucket];graphics_passes[bucket]=entry;graphics_pass_creations++;pthread_mutex_unlock(&graphics_object_lock);return entry;
 }
 static graphics_frame_entry *graphics_frame_get(graphics_pass_entry *pass,const VkImageView *views,image_entry *const *images,uint32_t width,uint32_t height) {
     graphics_frame_key key={.pass=pass,.width=width,.height=height};memcpy(key.views,views,pass->key.attachments*sizeof *views);unsigned bucket=graphics_hash(&key,sizeof key)&1023;

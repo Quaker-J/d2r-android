@@ -111,7 +111,7 @@ static void draw_graphics(const p_draw *draw,const p_draw_idx *indexed) {
         graphics_pass_end();
         for(unsigned i=0;i<na;i++)if(i==depth.attachment)image_access(images[i],VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT|VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
             else image_access(images[i],VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,VK_ACCESS_COLOR_ATTACHMENT_READ_BIT|VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
-        graphics_pass_entry *pass=graphics_pass_get(pass_key,attachments,colors,depth);frame=graphics_frame_get(pass,views,images,width,height);
+        graphics_pass_entry *pass=graphics_pass_get(pass_key,attachments,colors,depth,1);frame=graphics_frame_get(pass,views,images,width,height);
     }
     // 只复制索引真正可访问的顶点前缀，避免每次绘制读取整段大型绑定池。
     // Copy only the vertex prefix reachable by the actual indices, rather than the entire large bound pool for every draw.
