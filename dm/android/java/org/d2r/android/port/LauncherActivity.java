@@ -104,6 +104,27 @@ public final class LauncherActivity extends Activity {
         return kept.toString();
     }
 
+    // 游戏还活着时启动界面立刻让位。
+    // 从桌面点图标回来时，安卓会在**游戏上面**再开一个启动界面（启动界面是本应用的入口活动），玩家看到的是启动界面、
+    // 像是"游戏没了"；再点一次「启动游戏」就会开第三个活动，把中间那个游戏活动销毁 —— 而销毁游戏活动在本项目里等于
+    // 结束整个进程（一个进程只跑一个游戏），新开的那个也一起死，安卓随后重新起进程从头加载，表现成"应用终止、这一局没了"。
+    // 所以只要游戏活动还在（同进程的静态标记），这里直接 finish 自己，把下面的游戏露出来，走我们已经真机验证过的
+    // 「回前台重建交换链」那条路。想改设置（分辨率 / 换数据包）请先把应用从最近任务里划掉 —— 那才是真正退出。
+    // While the game is alive the launcher steps aside. Tapping the icon from the home screen makes Android push a
+    // *second* launcher instance on top of the game (the launcher is this app's entry activity), so the player sees
+    // the launcher and the game looks gone; tapping "start game" then creates a third activity and destroys the game
+    // one in the middle -- and in this project destroying the game activity ends the whole process (one guest per
+    // process), taking the new activity down with it, after which Android starts a fresh process and reloads from
+    // scratch, i.e. "the app terminated and the session is gone". So whenever the game activity is still alive (a
+    // static flag in this process) the launcher finishes itself at once, revealing the game underneath and going
+    // through the background-return path already verified on device. To change settings (resolution, another
+    // package) swipe the app away from recents first -- that is a real exit.
+    private boolean stepAsideForRunningGame() {
+        if (!D2RActivity.hostRunning) return false;
+        finish();
+        return true;
+    }
+
     private File configFile() {
         File directory = new File(getFilesDir(), "temp");
         if (!directory.isDirectory() && !directory.mkdirs()) throw new IllegalStateException("cannot create " + directory);
@@ -226,6 +247,7 @@ public final class LauncherActivity extends Activity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        if (stepAsideForRunningGame()) return;
         int width = getResources().getDisplayMetrics().widthPixels;
         int height = getResources().getDisplayMetrics().heightPixels;
         int margin = (int)(width * 0.045f);
@@ -286,6 +308,7 @@ public final class LauncherActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
+        if (stepAsideForRunningGame()) return;
         refreshFromDisk();
     }
 

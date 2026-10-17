@@ -40,6 +40,11 @@ public final class D2RActivity extends NativeActivity {
     private volatile int batteryLevel = -1;
     private volatile int batteryStatus = -1;
     private boolean physicalController;
+    // 同一进程里「游戏活动是否还活着」的标记，启动界面据此决定让位（见 LauncherActivity.stepAsideForRunningGame）。
+    // 一个进程只跑一个游戏，所以它也等于「这一局还在」。
+    // Same-process flag: is the game activity still alive. The launcher uses it to decide whether to step aside (see
+    // LauncherActivity.stepAsideForRunningGame). One process hosts one guest, so it also means "this session is live".
+    static volatile boolean hostRunning;
     private static native void onTextResult(long request, String text, boolean accepted);
     private static native void onTouchPad(long buttons, int leftX, int leftY, int rightX, int rightY);
 
@@ -132,6 +137,9 @@ public final class D2RActivity extends NativeActivity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        // 标记与活动的「创建 / 销毁」这一对绑定，语义就是"这个进程里还住着一个游戏活动"。
+        // The flag is paired with activity creation/destruction: it means "a game activity still lives in this process".
+        hostRunning = true;
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING);
         debugView = new TextView(this);
         debugView.setTypeface(Typeface.MONOSPACE);
@@ -312,6 +320,7 @@ public final class D2RActivity extends NativeActivity {
     }
 
     @Override protected void onDestroy() {
+        hostRunning = false;
         if (batteryReceiver != null) { unregisterReceiver(batteryReceiver); batteryReceiver = null; }
         InputManager inputManager = (InputManager) getSystemService(Context.INPUT_SERVICE);
         if (inputManager != null) inputManager.unregisterInputDeviceListener(inputDeviceListener);
