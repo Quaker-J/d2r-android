@@ -31,6 +31,22 @@ python3 dm/android/tools/ci_checks.py          # 可选：跑与仓库 CI 相同
 
 想让 APK 自带游戏代码（不再依赖导入）需要先按[构建说明](docs/ANDROID_BUILD.zh-CN.md)从你自己的游戏文件生成模块，再给 `build.py` 加 `--game-source <目录>`。完整步骤见[Android 构建与部署](docs/ANDROID_BUILD.zh-CN.md)。
 
+## 界面
+
+实机截图（OPPO OPD2409 / Adreno 830）。游戏画面左上角是调试浮层的实时数字：帧率、帧时、CPU / GPU 耗时、功耗与绘制计数。
+
+**启动界面** —— 数据包导入、画面档位、输出分辨率、存档导入 / 导出。启动界面是普通应用界面，没有帧率浮层：
+
+![启动界面](docs/images/launcher.jpg)
+
+**英雄选择** —— 从备份导入存档后，角色直接回来：
+
+![英雄选择](docs/images/hero.jpg)
+
+**营地** —— Act I 营地，实测 60.0 FPS / 帧时 16.7 ms：
+
+![营地](docs/images/camp.jpg)
+
 ## 项目进展（2026-10-17）
 
 - 游戏本体的 ARM64 程序运行在 Android 宿主上，图形走 NVN → Vulkan；已具备 AAudio 声音、系统键盘命名、虚拟摇杆与按键、**手柄输入（含十字键与 ZL/ZR）**、FPS/CPU/GPU 调试浮层（默认关闭，可用游戏内菜单开）。

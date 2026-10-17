@@ -31,6 +31,22 @@ python3 dm/android/tools/ci_checks.py          # optional: the same checks the r
 
 To embed the game code in the APK instead of importing it, first generate the modules from your own game files as [the build notes](docs/ANDROID_BUILD.md) describe, then pass `--game-source <dir>` to `build.py`.
 
+## Screens
+
+Captured on the device (OPPO OPD2409 / Adreno 830). The block in the top-left corner of the game frames is the debug overlay, live: frame rate, frame time, CPU / GPU time, power draw and draw counts.
+
+**Launcher** — package import, display profile, output resolution, save import / export. It is an ordinary app screen, so it has no frame overlay:
+
+![Launcher](docs/images/launcher.jpg)
+
+**Hero selection** — the character came back after importing a save from a backup:
+
+![Hero selection](docs/images/hero.jpg)
+
+**Camp** — Act I camp, measured 60.0 FPS / 16.7 ms per frame:
+
+![Camp](docs/images/camp.jpg)
+
 ## Progress (2026-10-17)
 
 - The game's ARM64 code runs on an Android host with NVN → Vulkan; AAudio sound, system-keyboard name entry, virtual stick and buttons, **gamepad support (D-pad and ZL/ZR included)** and an FPS/CPU/GPU overlay (off by default, switchable from the in-game menu).
