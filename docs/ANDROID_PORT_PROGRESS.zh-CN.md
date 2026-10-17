@@ -60,9 +60,9 @@ English: [ANDROID_PORT_PROGRESS.md](ANDROID_PORT_PROGRESS.md)
 2. 计算管线仍未录制（至今首次现编 26.7–56.6 ms）：在录制端加 compute 挂点并扩展清单格式后可一并预热。
 3. 把本机积累的 `pso_vk_user.tsv`（139 条）整理为仓库种子清单随构建发布，让驱动更新/清数据/新设备直接受益；注意**必须先修掉预热路径遇到可疑记录会 `die()` 的问题**（文档承诺"可疑记录跳过"但未实现），否则等于发布崩溃风险。
 4. 继续定位剩余长帧：21–30 ms 轻超帧的线程 CPU 波动点、表情轮盘簇、恢复/切场景后簇。
-5. 分辨率再往上（2560×1440 以上）必须先解决取舍：营地 1440p 已经吃掉约 2 FPS、fence_wait 涨到 2.15 ms，再往上就会越过 16.7 ms 预算而触发 3D 内部比例降档（降到 0.72/0.70），那时 UI 更清但 3D 更糊。
-6. 在新手机部署同一提交，确认显示、触控和实际帧率。
-7. 任何电脑 clone 后可按 `docs/ANDROID_BUILD.zh-CN.md` 重建、按 `.claude/skills/d2r-package` 生成数据包；主线保持 Android 优化，LASRecomp 和 Eden 作为渲染实现参考（Eden 的着色器翻译是 GPL-3.0，不能并入本 MIT 项目）。
+6. **超分（FSR 类）是可选的第三条画质杠杆**：我们现在最后一步是用 `VK_FILTER_LINEAR` 把 1600×900 的游戏画面以 2.12 倍双线性放大到面板（上下留黑边），Eden 的 FSR 1.0 正好挂在这个位置。调研结论、许可边界（AMD 头 MIT 可用 / Eden 胶水 GPL-3.0 不可用 / 高通 SGSR 是 BSD-3）与「先离线截图对照、再上机 A/B」的步骤见 [FSR 超分调研](ANDROID_UPSCALING_RESEARCH.zh-CN.md)。**尚未实施、也没在 Adreno 上测过开销。**
+7. 在新手机部署同一提交，确认显示、触控和实际帧率。
+8. 任何电脑 clone 后可按 `docs/ANDROID_BUILD.zh-CN.md` 重建、按 `.claude/skills/d2r-package` 生成数据包；主线保持 Android 优化，LASRecomp 和 Eden 作为渲染实现参考（Eden 的着色器翻译是 GPL-3.0，不能并入本 MIT 项目）。
 
 ## 历史进度（以下版本、端口与待办按当时状态保留）
 
@@ -561,3 +561,4 @@ python dm/android/tools/build.py --game-source ~/dm-work/build/android/game --in
 - 调试可观测性：调试线程每 10 秒多一行 `[android] 运行状态 frame=… 输入样本=… 3D=… 客体时钟=… s`。3D 比例决定"抬分辨率到底有没有让 3D 变清"，客体时钟决定"后台那段有没有被算进游戏时间"——原来那条 `game progress` 只在前 48 秒打（兼首帧看门狗），覆盖不到进局之后。
 - 分辨率（颜色档位之外的第三行设置）：写 `DM_GAME_RES`，与 Mac/iOS 同一语义（主机档 = 设定值，掌机档按 0.8 同比例）。从界面到 native 的整链已真机验证：`分辨率：跟随档位 → 点一下 1920×1080 → 再点 2560×1440` → 配置写出 `resolution=2560x1440` → `环境核对 DM_GAME_RES=2560x1440` → `WindowInitialize 首张 2560x1440`。营地实测（16 个 60 帧窗口）：**1600×900 → 1920×1080 基本免费**（FPS 58.64 → 58.07、fence_wait 0.81 → 0.86 ms），**2560×1440 约 −2 FPS**（56.61）且 fence_wait 涨到 2.15 ms；三档都**没有**出现 `3D 比例控制` 降档记录（3D 内部比例保持满值）。注意 `vulkan-time` 的 `GPU=` 只统计游戏批次、不含最后的缩放合成，所以分辨率的代价要看帧率与 fence_wait，不能只看它。
 - 本轮设备验证踩过的坑（下次直接用）：① `D2RActivity` 没有 `exported`，`adb shell am start` 拉不起它、而且**失败是静默的**（上一轮的"返回前台"测试就是这样假通过的）；正确做法是把整个任务移回前台 `am task focus <任务号>`，任务号要从 `dumpsys activity activities` 里按包名取 —— 从 `dumpsys activity recents` 取会取错，实测抓到过"设置"那个任务。② 设备测试脚本**必须先 `install -r` 当前构建**，否则是拿旧包在测（本轮因此白跑过一整轮）。③ `make -C dm/host/tests run` 在这台机器上跑不了（`t_thread_leak`、`t_i18n` 用了 macOS 专有头文件 `malloc/malloc.h`、`TargetConditionals.h`）；可用 `~/dm-work/tools/android/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin` 里的 clang 单独编译。本轮实跑通过：`t_padmap` 29 项、`launch_settings_test` 普通 53 项 + 环境故障注入 59 项、`dm/i18n/scan_literals.py`、`dm/ios/tools/dm_i18n.py --check`（368 条）。
+- 超分调研（用户问「Eden 似乎有 FSR 超分提升画质，调研下」）：Eden 用的是 **FSR 1.0**（EASU 上采样 + RCAS 锐化，纯空间），挂在**出屏前的最后一步当缩放滤镜**、倍率由内部分辨率隐式决定、只暴露一个锐度滑条；AMD 头是 MIT，但 Eden 自己写的胶水是 GPL-3.0 **不能并入本 MIT 项目**（它还给 Adreno 准备了 BSD-3 的高通 SGSR，官方说更快）。对照我们的现状：最后一步正是用 `VK_FILTER_LINEAR` 把 1600×900 以 **2.12 倍双线性**放大到 3392×2400 面板（上下留黑边，截图核对过），也就是 Eden 放 FSR 的那个位置 —— 所以「不抬渲染分辨率、只把这一步换成更好的空间超分」是一条独立于分辨率档位的画质杠杆。完整结论、许可边界、公开开销数据（手机 GPU 上原版两 pass ≈6.3 ms、优化单 pass ≈2 ms 净开销）与「先离线截图对照再上机」的步骤见 [FSR 超分调研](ANDROID_UPSCALING_RESEARCH.zh-CN.md)。**本轮只调研，没改渲染代码，也没在 Adreno 上测过任何 FSR 实现。**
