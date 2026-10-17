@@ -30,7 +30,7 @@ typedef struct {
     ANativeActivity *activity; ANativeWindow *window; AInputQueue *input;
     pthread_mutex_t lock; pthread_cond_t ready; pthread_t worker;
     int stop; _Atomic int started; _Atomic int activity_resumed;
-    uint64_t pad_buttons,hat_buttons,move_keys;int tap_a;int32_t lx,ly,rx,ry;
+    uint64_t pad_buttons,hat_buttons,trigger_buttons,move_keys;int tap_a;int32_t lx,ly,rx,ry;
     uint64_t touch_buttons;int32_t touch_lx,touch_ly,touch_rx,touch_ry;
     pthread_t debug_thread;int debug_started;_Atomic int debug_stop;
     float requested_frame_rate;int frame_rate_attempted;
@@ -315,9 +315,9 @@ static void pad_publish(game_app *s) {
     // simultaneously held DPAD keycode.
     if(!x&&!y){x=s->touch_lx;y=s->touch_ly;}
     int32_t rx=s->rx,ry=s->ry;if(!rx&&!ry){rx=s->touch_rx;ry=s->touch_ry;}
-    dm_pad_set(s->pad_buttons|s->hat_buttons|s->touch_buttons|(s->tap_a?DM_BTN_A:0),x,y,rx,ry);
+    dm_pad_set(s->pad_buttons|s->hat_buttons|s->trigger_buttons|s->touch_buttons|(s->tap_a?DM_BTN_A:0),x,y,rx,ry);
 }
-static void pad_clear(game_app *s) {s->pad_buttons=s->hat_buttons=s->move_keys=s->touch_buttons=0;s->tap_a=0;s->lx=s->ly=s->rx=s->ry=s->touch_lx=s->touch_ly=s->touch_rx=s->touch_ry=0;pad_publish(s);}
+static void pad_clear(game_app *s) {s->pad_buttons=s->hat_buttons=s->trigger_buttons=s->move_keys=s->touch_buttons=0;s->tap_a=0;s->lx=s->ly=s->rx=s->ry=s->touch_lx=s->touch_ly=s->touch_rx=s->touch_ry=0;pad_publish(s);}
 static int32_t touch_axis(jint value) {return value>DM_STICK_MAX?DM_STICK_MAX:value< -DM_STICK_MAX?-DM_STICK_MAX:value;}
 __attribute__((visibility("default"))) void Java_org_d2r_android_port_D2RActivity_onTouchPad(JNIEnv *env,jclass klass,jlong buttons,jint lx,jint ly,jint rx,jint ry) {
     (void)env;(void)klass;game_app *s=application;if(!s)return;
@@ -356,6 +356,19 @@ static int input_ready(int fd,int events,void *data) {
             // which press was recognised as which direction.
             if(hat!=s->hat_buttons)LOG("[android-pad] hat x=%.2f y=%.2f → buttons=%#llx",hx,hy,(unsigned long long)hat);
             s->hat_buttons=hat;
+            // 扳机（ZL/ZR）：Xbox 手柄把 LT/RT 报成模拟轴而不是 L2/R2 键码（见 dm_input.h），所以键码分支收不到，
+            // 必须在动这里读。AXIS_LTRIGGER/RTRIGGER 是主名字，部分手柄只给 AXIS_BRAKE/GAS 别名，作为兜底。
+            // Triggers (ZL/ZR): an Xbox pad reports LT/RT as analogue axes rather than L2/R2 keycodes (see
+            // dm_input.h), so the keycode branch never sees them and they have to be read here. AXIS_LTRIGGER /
+            // RTRIGGER are the primary names; some pads only expose the AXIS_BRAKE / GAS aliases, read as a fallback.
+            float lt=AMotionEvent_getAxisValue(event,AMOTION_EVENT_AXIS_LTRIGGER,0);if(!lt)lt=AMotionEvent_getAxisValue(event,AMOTION_EVENT_AXIS_BRAKE,0);
+            float rt=AMotionEvent_getAxisValue(event,AMOTION_EVENT_AXIS_RTRIGGER,0);if(!rt)rt=AMotionEvent_getAxisValue(event,AMOTION_EVENT_AXIS_GAS,0);
+            uint64_t trigger=dm_pad_trigger_buttons(lt,rt);
+            // 同样只在变化时记：出问题时能直接看到扳机按到多少才算按下（阈值在 dm_input.h 里，一处可调）。
+            // Logged on change as well, so a misbehaving trigger shows exactly how far it was pressed; the threshold
+            // lives in dm_input.h and is the single place to tune.
+            if(trigger!=s->trigger_buttons)LOG("[android-pad] trigger LT=%.2f RT=%.2f → buttons=%#llx (阈值 %.2f)",lt,rt,(unsigned long long)trigger,0.5);
+            s->trigger_buttons=trigger;
             pad_publish(s);handled=1;
         }else if(is_motion){int raw_action=AMotionEvent_getAction(event),action=raw_action&AMOTION_EVENT_ACTION_MASK;unsigned lifted=(raw_action&AMOTION_EVENT_ACTION_POINTER_INDEX_MASK)>>AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT;dm_touch touches[16];int count=0;
             pthread_mutex_lock(&s->lock);ANativeWindow *window=s->window;int w=window?ANativeWindow_getWidth(window):1,h=window?ANativeWindow_getHeight(window):1;pthread_mutex_unlock(&s->lock);
@@ -366,7 +379,14 @@ static int input_ready(int fd,int events,void *data) {
             // First-frame controls: taps confirm title/prompts; HLE latches press edges so short taps are retained.
             if(action==AMOTION_EVENT_ACTION_DOWN)s->tap_a=1;else if(action==AMOTION_EVENT_ACTION_UP||action==AMOTION_EVENT_ACTION_CANCEL)s->tap_a=0;pad_publish(s);handled=1;
         }else if(AInputEvent_getType(event)==AINPUT_EVENT_TYPE_KEY){int key=AKeyEvent_getKeyCode(event),down=AKeyEvent_getAction(event)==AKEY_EVENT_ACTION_DOWN;uint64_t button=pad_key(key),move=key==AKEYCODE_W?DM_BTN_UP:key==AKEYCODE_A?DM_BTN_LEFT:key==AKEYCODE_S?DM_BTN_DOWN:key==AKEYCODE_D?DM_BTN_RIGHT:0;
-            if(button){if(down)s->pad_buttons|=button;else s->pad_buttons&=~button;handled=1;}if(move){if(down)s->move_keys|=move;else s->move_keys&=~move;handled=1;}if(handled)pad_publish(s);}
+            if(button){uint64_t before=s->pad_buttons;if(down)s->pad_buttons|=button;else s->pad_buttons&=~button;handled=1;
+                // 按键码这条路也要看得见（LB/RB/A/B 等走这里，部分手柄的方向键也走这里）：出问题时能直接对上
+                // 哪一颗键换来哪一位，不必靠猜。只在位掩码真的变了才记，连按不放不会刷屏。
+                // The keycode path has to be visible too (LB/RB/A/B and, on some pads, the D-pad come through here):
+                // when something misbehaves this shows which button produced which bit instead of leaving it to
+                // guesswork. Logged only when the mask really changes, so holding a button does not flood the log.
+                if(s->pad_buttons!=before)LOG("[android-pad] keycode=%d down=%d → buttons=%#llx",key,down,(unsigned long long)s->pad_buttons);}
+            if(move){if(down)s->move_keys|=move;else s->move_keys&=~move;handled=1;}if(handled)pad_publish(s);}
         AInputQueue_finishEvent(s->input,event,handled);
     }return 1;
 }

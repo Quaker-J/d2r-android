@@ -75,6 +75,35 @@ public final class LauncherActivity extends Activity {
         return resource == 0 ? key : getString(resource);
     }
 
+    // 启动界面只拥有这几个键。文件里其余的键是别处写的（例如诊断用的 input_receipts），重写时必须原样留下 ——
+    // 否则「从启动界面启动游戏」会把它们悄悄抹掉。实测就丢过一次 input_receipts=1：配置里写着、native 读到的
+    // 却是「未设」，HID 收样一直没生成，查了半天才发现是这个覆盖。
+    // The launcher owns only these keys. Any other key in the file was written elsewhere (a diagnostic such as
+    // input_receipts, for instance) and has to survive a rewrite -- otherwise starting the game from the launcher
+    // silently drops it. Measured once with input_receipts=1: the file said so, native read "unset", the HID
+    // receipts were never produced, and the overwrite was the last thing found.
+    private static final String[] OWNED_KEYS = {"debug_overlay", "operation_mode", "resolution"};
+
+    // 读出文件里不归我们管的行，原样带上（不改变取值，只保证不被抹掉）。
+    // Lines in the file we do not own, carried over verbatim (values untouched, they are merely kept from vanishing).
+    private String foreignLines() {
+        StringBuilder kept = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                new FileInputStream(configFile()), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                int equals = line.indexOf('=');
+                if (equals <= 0) continue;                                  // 空行与注释由上面自己写 | blank lines and comments are written above
+                String key = line.substring(0, equals).trim();
+                if (key.isEmpty() || key.startsWith("#")) continue;
+                boolean owned = false;
+                for (String ownedKey : OWNED_KEYS) if (ownedKey.equals(key)) { owned = true; break; }
+                if (!owned) kept.append(line.trim()).append('\n');
+            }
+        } catch (IOException ignored) { }
+        return kept.toString();
+    }
+
     private File configFile() {
         File directory = new File(getFilesDir(), "temp");
         if (!directory.isDirectory() && !directory.mkdirs()) throw new IllegalStateException("cannot create " + directory);
@@ -443,6 +472,7 @@ public final class LauncherActivity extends Activity {
         // 跟随档位时不写这个键：native 语义里"省略"就是不改动，保持原版 16:9 常数。
         // "Follow profile" writes no key: omitting it means "leave it alone" to native, keeping the original 16:9 constants.
         if (!RESOLUTION_PRESETS[resolutionIndex].isEmpty()) content.append("resolution=").append(RESOLUTION_PRESETS[resolutionIndex]).append('\n');
+        content.append(foreignLines());
         write(configFile(), content.toString());
         setStatus("", PARCHMENT);
         startActivity(new Intent(this, D2RActivity.class));

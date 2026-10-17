@@ -35,6 +35,18 @@ int main(void) {
     CHECK(dm_pad_hat_buttons(1, 1) == (DM_BTN_RIGHT | DM_BTN_DOWN), "HAT 右下 = Right+Down");
     CHECK(dm_pad_hat_buttons(0.4f, -0.4f) == 0, "低于阈值不触发（容忍模拟量漂移）");
     CHECK(dm_pad_hat_buttons(-0.5f, 0) == DM_BTN_LEFT, "恰好 -0.5 算触发（边界含）");
+    // 扳机 ZL/ZR 的模拟轴映射（dm_input.h）：Xbox 的 LT/RT 在安卓上是 0–1 的轴、不是键码；阈值 0.5（实测轴的
+    // flat 区约 0.06，离噪声足够远）。真机若手感偏重/偏轻，改 dm_input.h 里那一个阈值即可。
+    // Analogue-axis mapping for the ZL/ZR triggers (dm_input.h): an Xbox pad reports LT/RT as 0-1 axes, not
+    // keycodes; the threshold is 0.5 (the axis flat region measures about 0.06, well clear of the noise). If the
+    // feel is too heavy or too light on a real pad, the single threshold in dm_input.h is the place to change.
+    CHECK(dm_pad_trigger_buttons(0, 0) == 0, "扳机松开 = 不按");
+    CHECK(dm_pad_trigger_buttons(1, 0) == DM_BTN_ZL, "LT 到底 = ZL");
+    CHECK(dm_pad_trigger_buttons(0, 1) == DM_BTN_ZR, "RT 到底 = ZR");
+    CHECK(dm_pad_trigger_buttons(1, 1) == (DM_BTN_ZL | DM_BTN_ZR), "两个扳机各给一位");
+    CHECK(dm_pad_trigger_buttons(0.4f, 0.4f) == 0, "半按不到阈值不算按下");
+    CHECK(dm_pad_trigger_buttons(0.5f, 0) == DM_BTN_ZL, "恰好 0.5 算按下（边界含）");
+    CHECK(dm_pad_trigger_buttons(0.06f, 0.06f) == 0, "flat 区抖动不触发");
     printf("== %d 项，失败 %d ==\n", checks, fails);
     return fails != 0;
 }
