@@ -21,6 +21,7 @@ import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
 
+import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
@@ -52,8 +53,7 @@ public final class LauncherActivity extends Activity {
     // The imported package unpacks here, the fixed location boot() looks for: it decides which data to use by
     // whether manifest.json is present.
     private static final String PACKAGE_DIRECTORY = "d2r-package";
-    private static final String MANIFEST_NAME = "manifest.json";
-    private static final String[] ALLOWED_PREFIXES = {"game/", "romfs/", "shaders/"};
+    private static final String MANIFEST_NAME = PackageArchive.MANIFEST;
     private static final int PICK_PACKAGE = 1;
     private static final int EXPORT_SAVE = 2;
     private static final int IMPORT_SAVE = 3;
@@ -410,8 +410,7 @@ public final class LauncherActivity extends Activity {
                     setStatus(summary, PARCHMENT);
                 });
             } catch (Exception error) {
-                String message = String.valueOf(error.getMessage());
-                runOnUiThread(() -> setStatus(String.format(text("dmAndroidLaunchImportFailed"), message), WARNING));
+                runOnUiThread(() -> setStatus(String.format(text("dmAndroidLaunchImportFailed"), failureText(error)), WARNING));
             } finally {
                 importing = false;
                 runOnUiThread(this::updateStartState);
@@ -427,119 +426,56 @@ public final class LauncherActivity extends Activity {
         return -1;
     }
 
-    // 解包顺序是刻意的：旧的 manifest.json 先删，新的最后才落盘。boot() 用"manifest.json 在不在"判断包能不能用，
-    // 所以中途失败（空间不足、取消、zip 损坏）留下的是个没有 manifest 的目录，游戏会回落到默认数据，而不是读到半个包。
-    // The order is deliberate: the previous manifest.json is removed first and the new one written last. boot()
-    // treats "manifest.json present" as "package usable", so an interrupted import (no space, cancelled, corrupt
-    // zip) leaves a directory without a manifest and the game falls back to the default data rather than reading
-    // half a package.
+    // 规则、验收与"最后才写完成标记"的顺序都在 PackageArchive 里（那部分不碰 Android API，能在电脑上跑回归），
+    // 这里只负责「流从哪来、进度怎么显示、取消怎么判断、失败怎么讲给玩家听」。
+    // The rules, the acceptance check and the write-the-marker-last ordering all live in PackageArchive (which holds
+    // no Android API and is regression-tested on a PC). This supplies only where the stream comes from, how progress
+    // is shown, how cancellation is noticed, and how a failure is told to the player.
     private String extract(Uri uri, long totalBytes) throws IOException {
-        File assets = packageDirectory();          // romfs / shaders / manifest.json
-        File modules = packageGameDirectory();     // game/：必须在内部目录，外部是 noexec
-        File manifest = packageManifest();
-        if (manifest.isFile() && !manifest.delete()) throw new IOException("cannot clear " + manifest);
-        deleteTree(modules);                       // 上一次导入的模块不能留下来跟新包混在一起
-        byte[] manifestBytes = null;
-        int romfs = 0, shaders = 0, game = 0;
-        byte[] buffer = new byte[1 << 20];
-        long written = 0, lastReported = 0;
+        PackageArchive.Counts counts;
         try (InputStream raw = getContentResolver().openInputStream(uri)) {
             if (raw == null) throw new IOException("cannot open the selected file");
-            try (ZipInputStream zip = new ZipInputStream(raw)) {
-                ZipEntry entry;
-                while ((entry = zip.getNextEntry()) != null) {
-                    if (cancelImport) throw new IOException("cancelled");
-                    String name = entry.getName();
-                    if (entry.isDirectory()) continue;
-                    if (name.equals(MANIFEST_NAME)) {
-                        // 读进内存，最后再落盘；顺序说明见函数上方。
-                        // Kept in memory and written last; see the ordering note above the function.
-                        manifestBytes = readAll(zip);
-                        continue;
-                    }
-                    if (!allowed(name)) throw new IOException("unexpected entry in package: " + name);
-                    // game/ 剥掉前缀后落到内部目录，其余原样落到外部目录。
-                    // game/ drops its prefix and lands in the internal directory; everything else goes external.
-                    File destination = name.startsWith("game/")
-                        ? safeDestination(modules, name.substring("game/".length()))
-                        : safeDestination(assets, name);
-                    File parent = destination.getParentFile();
-                    if (parent != null && !parent.isDirectory() && !parent.mkdirs()) throw new IOException("cannot create " + parent);
-                    written += writeFile(zip, destination, buffer);
-                    if (name.startsWith("romfs/")) romfs++;
-                    else if (name.startsWith("shaders/")) shaders++;
-                    else if (!name.equals(DERIVED_NAME)) game++;   // derived.tsv 不算模块 | not a module
-                    if (totalBytes > 0 && written - lastReported > totalBytes / 100) {
-                        lastReported = written;
-                        final int percent = (int)Math.min(100, written * 100 / totalBytes);
-                        runOnUiThread(() -> setStatus(String.format(text("dmAndroidLaunchImporting"), percent), MUTED));
-                    }
+            counts = PackageArchive.unpack(raw, packageDirectory(), packageGameDirectory(), totalBytes,
+                                           new PackageArchive.Sink() {
+                @Override public void progress(final int percent) {
+                    runOnUiThread(() -> setStatus(String.format(text("dmAndroidLaunchImporting"), percent), MUTED));
                 }
-            }
+                @Override public boolean cancelled() { return cancelImport; }
+            }, LauncherActivity::declaration);
         }
-        if (manifestBytes == null) throw new IOException("package has no " + MANIFEST_NAME);
-        if (romfs == 0 || shaders == 0 || game == 0) throw new IOException("package is incomplete");
-        String summary = String.format(text("dmAndroidLaunchImportSummary"),
-                                       counts(manifestBytes, "romfs", romfs), counts(manifestBytes, "shaders", shaders));
-        try (OutputStream out = new FileOutputStream(manifest, false)) {
-            out.write(manifestBytes);
-        }
-        return summary;
+        // 显示**实际解出**的数量。清单自报的数只参与校验、不当结果显示 —— 以前正是把它当结果显示，
+        // 才让一个只装了一个文件的包报出"46 个资源、20795 个着色器"。
+        // Report what was **actually** unpacked. The manifest's own numbers are only compared, never displayed:
+        // displaying them is what once made a package holding one file report "46 assets, 20795 shaders".
+        return String.format(text("dmAndroidLaunchImportSummary"), counts.romfs, counts.shaders);
     }
 
-    // 包自报的条目数与实际解出的数量不一致就说不一致，不拿其中一个当"结果"糊过去。
-    // If the package's own count disagrees with what was unpacked, say so instead of quietly picking one.
-    private int counts(byte[] manifest, String key, int extracted) {
+    // 清单的解析交给 org.json（Android 自带）；规则层只要这几个数，所以不依赖任何 JSON 实现。
+    // org.json does the parsing. The rule layer wants only these few numbers, so it depends on no JSON library.
+    private static PackageArchive.Declaration declaration(byte[] manifest) throws IOException {
         try {
-            return new JSONObject(new String(manifest, StandardCharsets.UTF_8)).getJSONObject("counts").getInt(key);
-        } catch (Exception ignored) {
-            return extracted;
+            JSONObject root = new JSONObject(new String(manifest, StandardCharsets.UTF_8));
+            JSONObject counts = root.optJSONObject("counts");
+            return new PackageArchive.Declaration(
+                root.optInt("format", PackageArchive.Declaration.ABSENT),
+                counts == null ? PackageArchive.Declaration.ABSENT : counts.optInt("game", PackageArchive.Declaration.ABSENT),
+                counts == null ? PackageArchive.Declaration.ABSENT : counts.optInt("romfs", PackageArchive.Declaration.ABSENT),
+                counts == null ? PackageArchive.Declaration.ABSENT : counts.optInt("shaders", PackageArchive.Declaration.ABSENT));
+        } catch (JSONException error) {
+            throw new IOException("package manifest is not valid JSON: " + error.getMessage());
         }
     }
 
-    // 包根上的 derived.tsv 也允许（三张派生表的内容）；按**完整文件名**放行，不放宽成任意根文件。
-    // The package-root derived.tsv is allowed too (the content of the three derived tables); it is admitted by its
-    // exact name rather than by loosening the rule for arbitrary root files.
-    private static final String DERIVED_NAME = "derived.tsv";
-
-    private static boolean allowed(String name) {
-        if (name.equals(DERIVED_NAME)) return true;
-        for (String prefix : ALLOWED_PREFIXES) if (name.startsWith(prefix)) return true;
-        return false;
-    }
-
-    // 防 zip 内路径穿越：规范化后必须仍在目标目录之内，否则拒绝。
-    // Guards against path traversal inside the zip: the normalised path must still sit under the target.
-    private static File safeDestination(File target, String name) throws IOException {
-        File candidate = new File(target, name);
-        String root = target.getCanonicalPath() + File.separator;
-        if (!candidate.getCanonicalPath().startsWith(root)) throw new IOException("package entry escapes the target directory: " + name);
-        return candidate;
-    }
-
-    // 递归删除一棵目录树；只用于应用自己的包目录，不碰别处。
-    // Recursive delete, used only on the app's own package directory.
-    private static void deleteTree(File target) {
-        File[] children = target.listFiles();
-        if (children != null) for (File child : children) deleteTree(child);
-        if (target.exists() && !target.delete()) target.deleteOnExit();
-    }
-
-    private static byte[] readAll(InputStream source) throws IOException {
-        ByteArrayOutputStream collected = new ByteArrayOutputStream();
-        byte[] buffer = new byte[8192];
-        int count;
-        while ((count = source.read(buffer)) > 0) collected.write(buffer, 0, count);
-        return collected.toByteArray();
-    }
-
-    private static long writeFile(InputStream source, File destination, byte[] buffer) throws IOException {
-        long written = 0;
-        try (OutputStream out = new FileOutputStream(destination, false)) {
-            int count;
-            while ((count = source.read(buffer)) > 0) { out.write(buffer, 0, count); written += count; }
-        }
-        return written;
+    // 规则层抛出的失败带的是「哪条规则」的键，在这里翻成中英文字；表里没这个键就退回异常原文，方便看日志。
+    // A failure from the rule layer carries the key of the rule it broke; turn it into text here, falling back to
+    // the raw message when the table has no such key so the log stays useful.
+    private String failureText(Exception error) {
+        if (!(error instanceof PackageArchive.Failure)) return String.valueOf(error.getMessage());
+        PackageArchive.Failure failure = (PackageArchive.Failure) error;
+        String format = text(failure.key);
+        return format.equals(failure.key)
+            ? String.valueOf(error.getMessage())
+            : String.format(format, failure.arguments);
     }
 
     private void startGame() {

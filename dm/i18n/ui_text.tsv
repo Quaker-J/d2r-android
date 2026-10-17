@@ -362,6 +362,12 @@ dmAndroidLaunchImported	已导入：%s	Imported: %s	Android 启动界面
 dmAndroidLaunchImporting	正在导入 %d%%	Importing %d%%	Android 启动界面
 dmAndroidLaunchImportSummary	%d 个资源、%d 个着色器	%d assets, %d shaders	Android 启动界面
 dmAndroidLaunchImportFailed	导入失败：%s	Import failed: %s	Android 启动界面
+dmAndroidLaunchImportIncomplete	数据包不完整，缺：%s	Package incomplete; missing: %s	Android 启动界面
+dmAndroidLaunchImportFormat	数据包格式 %s 不认识，本版只认 %s	Unsupported package format %s; this build takes %s	Android 启动界面
+dmAndroidLaunchImportCounts	清单数量与实际不符（%s：清单 %s，实际 %s）	Count mismatch (%s: %s declared, %s unpacked)	Android 启动界面
+dmAndroidLaunchImportBadEntry	数据包里有不接受的条目：%s	Package contains an entry that is not accepted: %s	Android 启动界面
+dmAndroidLaunchImportTooBig	数据包过大或条目过多，已拒绝	Package too large or too many entries; refused	Android 启动界面
+dmAndroidLaunchImportCancelled	已取消导入	Import cancelled	Android 启动界面
 dmAndroidLaunchCancel	正在取消…	Cancelling…	Android 启动界面
 dmAndroidLaunchResolution	分辨率	Resolution	Android 启动界面
 dmAndroidLaunchFollowProfile	跟随档位	Follow profile	Android 启动界面

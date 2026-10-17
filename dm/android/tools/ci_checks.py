@@ -116,20 +116,27 @@ def main():
                         ("-std=c11", "-O3", "-Wall", "-Wextra", "-Werror", "-I", ROOT / "native",
                          "-DDM_LAUNCH_SETTINGS_TEST_WRAP_ENV", "-Wl,--wrap=setenv", "-Wl,--wrap=unsetenv"))
 
-        # 存档压缩/解压/原子替换是纯 Java，用项目 JDK 在宿主机上跑（19 项）。
-        if JAVAC.exists() and JAVA.exists():
-            classes = workspace / "classes"
+        # 存档的压缩/解压/原子替换、数据包导入的规则与验收都是纯 Java（不碰 Android API），用项目 JDK 在宿主机上跑。
+        # 数据包这一支是补上来的：导入曾经只检查"每个类别至少一个文件"，一个残缺的包能通过并让游戏开不了机。
+        # Save archive (zip/unzip/atomic swap) and package import (its rules and acceptance check) are both plain
+        # Java with no Android APIs, and run here on the host JDK. The package side was added late: import used to
+        # accept anything with at least one file per category, so a hollow package could pass and leave the game
+        # unable to start.
+        for source, test, label in (("SaveArchive.java", "SaveArchiveTest", "存档包"),
+                                    ("PackageArchive.java", "PackageArchiveTest", "数据包导入")):
+            if not (JAVAC.exists() and JAVA.exists()):
+                skipped.append("%s（%s）：没有项目 JDK（%s）" % (label, test, JAVAC))
+                continue
+            classes = workspace / ("classes-" + test)
             classes.mkdir()
             result = run([JAVAC, "-encoding", "UTF-8", "--release", "8", "-d", classes,
-                          ROOT / "java/org/d2r/android/port/SaveArchive.java", ROOT / "tests/SaveArchiveTest.java"])
+                          ROOT / "java/org/d2r/android/port" / source, ROOT / "tests" / (test + ".java")])
             if result.returncode != 0:
-                report("存档包（SaveArchiveTest，编译）", False, (result.stdout or "").strip()[-400:])
-            else:
-                result = run([JAVA, "-cp", classes, "org.d2r.android.port.SaveArchiveTest"])
-                report("存档包（SaveArchiveTest）", result.returncode == 0,
-                       (result.stdout or "").strip().splitlines()[-1] if result.stdout else "")
-        else:
-            skipped.append("存档包（SaveArchiveTest）：没有项目 JDK（%s）" % JAVAC)
+                report("%s（%s，编译）" % (label, test), False, (result.stdout or "").strip()[-400:])
+                continue
+            result = run([JAVA, "-cp", classes, "org.d2r.android.port." + test])
+            report("%s（%s）" % (label, test), result.returncode == 0,
+                   (result.stdout or "").strip().splitlines()[-1] if result.stdout else "")
 
         hygiene()
         table_stubs()
