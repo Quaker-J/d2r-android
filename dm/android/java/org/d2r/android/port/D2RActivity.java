@@ -18,6 +18,7 @@ import android.text.InputType;
 import android.view.WindowManager;
 import android.view.Display;
 import android.view.InputDevice;
+import android.view.MotionEvent;
 import android.util.Log;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -50,6 +51,7 @@ public final class D2RActivity extends NativeActivity {
     private volatile int batteryLevel = -1;
     private volatile int batteryStatus = -1;
     private boolean physicalController;
+    private boolean touchVisible;
     // 同一进程里「游戏活动是否还活着」的标记，启动界面据此决定让位（见 LauncherActivity.stepAsideForRunningGame）。
     // 一个进程只跑一个游戏，所以它也等于「这一局还在」。
     // Same-process flag: is the game activity still alive. The launcher uses it to decide whether to step aside (see
@@ -420,12 +422,27 @@ public final class D2RActivity extends NativeActivity {
     }
 
     private void updateTouchVisibility() {
-        if (touchControls != null)
-            touchControls.setVisible(controlsEnabled && activityResumed && hasWindowFocus() && textDialog == null && !physicalController);
+        if (touchControls == null) return;
+        boolean value = controlsEnabled && activityResumed && hasWindowFocus() && textDialog == null && !physicalController;
+        // 诊断构建：每次求值都打印。只打「状态翻转」时，恒为 false 的情况一行日志都不会留下，正是最难查的那种。
+        // Diagnostic build: log every evaluation. Logging only transitions leaves the always-false case with no line at
+        // all, which is exactly the case that is hardest to diagnose.
+        Log.i("D2RAndroid", "[touch] evaluate=" + value + " (enabled=" + controlsEnabled + " resumed=" + activityResumed +
+            " focus=" + hasWindowFocus() + " dialog=" + (textDialog != null) + " gamepad=" + physicalController + ")");
+        touchVisible = value;
+        touchControls.setVisible(value);
     }
 
-    // 手柄是否接入。只认 SOURCE_GAMEPAD / SOURCE_JOYSTICK，避免把触屏、遥控器也算成手柄。
-    // Is a gamepad connected: only SOURCE_GAMEPAD / SOURCE_JOYSTICK count, so touchscreens and remotes do not.
+    // 手柄是否接入。只认真正能推的摇杆轴，避免把触屏、遥控器、系统注入的虚拟键盘也算成手柄。
+    // Count only devices that actually expose stick axes, so touchscreens, remotes and virtual keyboards do not
+    // count as a controller.
+    //
+    // 只看 source 位不够：小米的 `uinput-xiaomi`（KEYBOARD | GAMEPAD，实测 2510DRK44C）是系统注入的虚拟键盘
+    // 节点，一根轴都没有，却带着 GAMEPAD 位。按 source 判断会把它当"已接入手柄"，于是虚拟摇杆与按键
+    // 永远不显示（本机实测症状）。
+    // Source bits alone are not enough: Xiaomi's `uinput-xiaomi` (KEYBOARD | GAMEPAD, measured on 2510DRK44C) is a
+    // system-injected virtual keyboard node with no axes at all, yet it carries the GAMEPAD bit. Treating source bits
+    // as a controller hides the on-screen stick and buttons for good (the symptom measured on that device).
     private boolean anyGamepad() {
         InputManager manager = (InputManager) getSystemService(Context.INPUT_SERVICE);
         if (manager == null) return false;
@@ -433,8 +450,23 @@ public final class D2RActivity extends NativeActivity {
             InputDevice device = manager.getInputDevice(id);
             if (device == null) continue;
             int sources = device.getSources();
-            if ((sources & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD ||
-                (sources & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK) return true;
+            // source 是「类别 + 类型」的复合值，不能用「与掩码有交集」判断：键盘 0x101、触摸屏 0x1103 都带
+            // 0x1（CLASS_BUTTON），与 SOURCE_GAMEPAD(0x401) 相交，于是触摸屏成了手柄候选，它自己的 ABS_X/ABS_Y
+            // 又正好满足下面的轴检查 —— 这就是本机 gamepad=true 的根因。必须按「掩码全中」判断。
+            // Sources are composite, so an "any shared bit" test is wrong: keyboards (0x101) and touchscreens
+            // (0x1103) carry the 0x1 CLASS_BUTTON bit, which overlaps SOURCE_GAMEPAD (0x401). The touchscreen then
+            // becomes a candidate and its own ABS_X/ABS_Y satisfy the axis test below -- the measured cause of
+            // gamepad=true here. Require all mask bits instead.
+            if ((sources & InputDevice.SOURCE_GAMEPAD) != InputDevice.SOURCE_GAMEPAD &&
+                (sources & InputDevice.SOURCE_JOYSTICK) != InputDevice.SOURCE_JOYSTICK) continue;
+            Log.i("D2RAndroid", "[touch] device " + id + " '" + device.getName() + "' sources=0x" +
+                Integer.toHexString(sources) + " ranges=" + device.getMotionRanges().size());
+            for (InputDevice.MotionRange range : device.getMotionRanges()) {
+                int axis = range.getAxis();
+                if (axis == MotionEvent.AXIS_X || axis == MotionEvent.AXIS_Y ||
+                    axis == MotionEvent.AXIS_RX || axis == MotionEvent.AXIS_RY ||
+                    axis == MotionEvent.AXIS_HAT_X || axis == MotionEvent.AXIS_HAT_Y) return true;
+            }
         }
         return false;
     }

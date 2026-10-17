@@ -12,6 +12,7 @@ import android.view.DisplayCutout;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
+import android.util.Log;
 import android.view.WindowInsets;
 import android.widget.PopupWindow;
 import java.util.ArrayList;
@@ -68,6 +69,8 @@ final class TouchControls {
     }
 
     void setVisible(boolean value) {
+        Log.i("D2RAndroid", "[touch] setVisible(" + value + ") destroyed=" + destroyed +
+            " attached=" + decor.isAttachedToWindow());
         if (destroyed) return;
         visible = value;
         if (value) decor.post(this::layout);
@@ -100,9 +103,17 @@ final class TouchControls {
     }
 
     private void layout() {
-        if (!visible || destroyed || activity.isFinishing() || activity.isDestroyed() || !decor.isAttachedToWindow()) return;
+        if (!visible || destroyed || activity.isFinishing() || activity.isDestroyed() || !decor.isAttachedToWindow()) {
+            Log.i("D2RAndroid", "[touch] layout skipped visible=" + visible + " destroyed=" + destroyed +
+                " finishing=" + activity.isFinishing() + " gone=" + activity.isDestroyed() +
+                " attached=" + decor.isAttachedToWindow());
+            return;
+        }
         int width = decor.getWidth(), height = decor.getHeight();
-        if (width <= 0 || height <= 0) return;
+        if (width <= 0 || height <= 0) {
+            Log.i("D2RAndroid", "[touch] layout zero decor=" + width + "x" + height);
+            return;
+        }
         if (width != previousWidth || height != previousHeight) releaseAll();
         previousWidth = width; previousHeight = height;
         int safeLeft = 0, safeRight = 0, safeTop = 0, safeBottom = 0;
@@ -161,6 +172,10 @@ final class TouchControls {
         float compactX = (width - combined) / 2;
         dpad.place(compactX, compactY);
         menu.place(compactX + dpad.pixelWidth() + margin * 2, compactY);
+        Log.i("D2RAndroid", "[touch] layout decor=" + width + "x" + height + " scale=" + scale +
+            " stick=" + Math.round(stick.windowX) + "," + Math.round(stick.windowY) +
+            " stickPx=" + stick.pixelWidth() + "x" + stick.pixelHeight() +
+            " face=" + Math.round(face.windowX) + "," + Math.round(face.windowY));
     }
 
     private static final class Key {
@@ -236,6 +251,8 @@ final class TouchControls {
                 popup.setWidth(width); popup.setHeight(height);
                 popup.showAtLocation(decor, Gravity.TOP | Gravity.LEFT, Math.round(x), Math.round(y));
             }
+            Log.i("D2RAndroid", "[touch] place " + (stick ? "stick" : "group" + source) + " at " +
+                Math.round(x) + "," + Math.round(y) + " " + width + "x" + height + " showing=" + popup.isShowing());
             invalidate();
         }
 

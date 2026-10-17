@@ -26,3 +26,5 @@ local.env
 # CI：下载的 Android 工具链与打出的套件目录（都只在本机/runner 上）
 .tools/
 /dist/
+
+.work/
