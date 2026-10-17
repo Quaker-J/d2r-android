@@ -1,24 +1,60 @@
 # D2R Android
 
-Android ARM64 port snapshot based on [jhaizhou-ops/d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile), including the upstream sources and the Android host, Vulkan backend, audio, touch controls, and build tools.
+Runs the **original ARM64 build of Diablo II: Resurrected** natively on Android (NVN → Vulkan rendering, AAudio sound, touch and gamepad input); the repository holds only the host/port code and tools, and **no game content**.
 
-中文及完整状态：[README.zh-CN.md](README.zh-CN.md)
+中文：[README.zh-CN.md](README.zh-CN.md)
 
-## Status — 2026-10-16
+## Quick start
 
-The game runs with Vulkan rendering, AAudio, native text entry and touch controls. Adreno 830 camp measurements average approximately 60 FPS: of 151 consecutive 120-frame windows covering standing and walking, 142 had no frame over 33 ms. The other 9 line up with loading the save (worst 200.9 ms), one submission-queue wait (92.6 ms) and first visits to new ground (102.6 / 101.2 ms). An Adreno 840 phone has reached actual outdoor gameplay at approximately 59 FPS in a short observation, with landscape rendering and scaled controls verified; the current commit has not been installed on that phone. These observations do not establish sustained 60 FPS across all gameplay.
+**Option 1: download the built artifacts (recommended)**
 
-Cross-launch pipeline warm-up is implemented and verified on device (`dm/android/native/nvn_vulkan_warm.inc`): every genuine graphics pipeline creation is recorded to a private manifest and rebuilt on a background thread on the next launch. All 127 records were rebuilt in 447.7 ms, the driver pipeline cache reloaded successfully (`load=accepted bytes=1739369`), and the 30 menu pipeline creations fell from 826 ms before the fix to 1.1 ms.
+From [Releases](https://github.com/sydeEvans/d2r-android/releases) (CI publishes one whenever a `v*` tag is pushed):
 
-The remaining gap is first use in ground the player has not visited before, where the shader combinations used there still compile on demand (85.1 / 85.3 ms measured for single creations); the same route walked back stayed under 29.4 ms. Compute pipelines are not recorded yet and no seed manifest ships with the build.
+1. `D2R-Android-port.apk` — the phone app. It contains **no game data**; the data comes from the package below.
+2. `d2r-package-kit-<version>.zip` — the kit for your PC: the source (the packing tools live in it) + the `d2r-package` skill + that APK + a one-page readme.
 
-This is a source snapshot, not a fully validated release. No game executables, RomFS, keys, saves, translated game shaders, drivers or APKs are distributed here.
+Then:
 
-- [Android port progress (resume entry point, maintained)](docs/ANDROID_PORT_PROGRESS.zh-CN.md) — the English [ANDROID_PORT_PROGRESS.md](docs/ANDROID_PORT_PROGRESS.md) holds the current-state summary plus older, unmaintained history.
+1. Open the extracted kit in an AI agent (Claude Code or similar) and say: **"use the d2r-package skill to build my package and install it on my phone"**.
+2. The agent reads `.claude/skills/d2r-package/SKILL.md` and walks you through preparing **your own** game files (`.nsz` / `.nsp` / `.xci`) and `prod.keys`, then builds the data package locally (about an hour; `--reuse` makes later runs a few minutes).
+3. Following the skill's "install straight from adb" section, the agent installs the APK and pushes the package; you finish with two taps on the phone: import the package, then start the game.
+
+Your keys and game files never leave your computer.
+
+**Option 2: build it yourself (Linux x86_64)**
+
+```bash
+python3 dm/android/tools/bootstrap.py          # NDK / JDK / build-tools / platform (~800 MB, once)
+python3 dm/android/tools/build.py --game-run   # writes dm/android/build/D2R-Android-port.apk (generic)
+python3 dm/android/tools/ci_checks.py          # optional: the same checks the repository CI runs
+```
+
+To embed the game code in the APK instead of importing it, first generate the modules from your own game files as [the build notes](docs/ANDROID_BUILD.md) describe, then pass `--game-source <dir>` to `build.py`.
+
+## Progress (2026-10-17)
+
+- The game's ARM64 code runs on an Android host with NVN → Vulkan; AAudio sound, system-keyboard name entry, virtual stick and buttons, **gamepad support (D-pad and ZL/ZR included)** and an FPS/CPU/GPU overlay (off by default, switchable from the in-game menu).
+- **Launcher**: data-package import, display profile, output resolution (follow profile / 1080p / 1440p), save import/export.
+- **In-game menu** (on the system back key, modelled on Eden): frame rate display, on-screen controls, quality (four internal 3D resolution steps, effective immediately), export save, import save, exit. An accidental edge swipe no longer quits the run.
+- **Lifecycle**: going to the background asks the game to save before suspending, and the process is kept (window and swapchain rebuilt on return); tapping the icon after backgrounding goes straight back into the game.
+- **Performance**: camp on OPD2409 / Adreno 830 averages about 60 FPS (142 of 151 consecutive 120-frame windows had no frame over 33 ms). Cross-launch pipeline warm-up is verified on device (127 records rebuilt in 447.7 ms; menu pipeline creation fell from 826 ms to 1.1 ms). The remaining gap is first use of shader combinations on ground the player has not visited, plus occasional long frames.
+- **Not yet sustained 60 FPS in every scene**, and not a fully validated release. The [port progress](docs/ANDROID_PORT_PROGRESS.zh-CN.md) is authoritative.
+
+## Documentation
+
+- [Android port progress (resume entry point, authoritative)](docs/ANDROID_PORT_PROGRESS.zh-CN.md)
 - [Android build and deployment](docs/ANDROID_BUILD.md)
-- [Snapshot status and limitations](docs/ANDROID_RELEASE_SNAPSHOT.zh-CN.md)
+- [Data package format and packing](docs/ANDROID_PACKAGE.zh-CN.md)
+- [Launch settings](docs/ANDROID_LAUNCH_SETTINGS.zh-CN.md)
+- [Snapshot boundaries and known issues](docs/ANDROID_RELEASE_SNAPSHOT.zh-CN.md)
 - [Source provenance](docs/ANDROID_SOURCE_PROVENANCE.zh-CN.md)
 - [Original upstream README](docs/UPSTREAM_README.md)
-- [MIT license](LICENSE); retain third-party notices in their respective directories.
 
-Upstream baseline: `2eb5758771f110cd53082b999d88d242766610da`. Optimization references include dodola/d2r-mobile at `642480b7606cf4adda30bcf009eb56f87745c908`; this port retains its own Android backend. Historical development notes refer to local evidence not shipped with this source archive.
+## Dependencies and provenance
+
+- **Upstream**: [jhaizhou-ops/d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile) at `2eb5758771f110cd53082b999d88d242766610da`; its [MIT license](LICENSE) and third-party notices are retained.
+- **Optimization references**: [dodola/d2r-mobile](https://github.com/dodola/d2r-mobile) at `642480b7606cf4adda30bcf009eb56f87745c908`, Eden (a Switch emulator; its rendering and upscaling ideas are referenced, but its shader translation is GPL-3.0 and is **not** merged into this MIT project) and LASRecomp. The exact scope is in the [provenance notes](docs/ANDROID_SOURCE_PROVENANCE.zh-CN.md).
+- **Build dependencies**: Android NDK r28c, JDK 17, Android SDK build-tools / platform 35 (pinned by `bootstrap.py`).
+- **Packing game data additionally needs** (on the player's PC only): a Python venv (`lz4`, `capstone`, ...), `hactool`, and the .NET 10 SDK; the skill's prerequisites table lists them.
+
+**This repository does not contain** game executables, RomFS, keys, saves, translated game shaders, prebuilt drivers or APKs. The game modules and the data package are produced locally from **your own** files and are never distributed here or in a release. CI (GitHub Actions) builds only the generic APK and the kit described above; see [the build notes](docs/ANDROID_BUILD.md).
