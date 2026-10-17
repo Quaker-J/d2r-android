@@ -468,7 +468,7 @@ public final class LauncherActivity extends Activity {
                     written += writeFile(zip, destination, buffer);
                     if (name.startsWith("romfs/")) romfs++;
                     else if (name.startsWith("shaders/")) shaders++;
-                    else game++;
+                    else if (!name.equals(DERIVED_NAME)) game++;   // derived.tsv 不算模块 | not a module
                     if (totalBytes > 0 && written - lastReported > totalBytes / 100) {
                         lastReported = written;
                         final int percent = (int)Math.min(100, written * 100 / totalBytes);
@@ -497,7 +497,13 @@ public final class LauncherActivity extends Activity {
         }
     }
 
+    // 包根上的 derived.tsv 也允许（三张派生表的内容）；按**完整文件名**放行，不放宽成任意根文件。
+    // The package-root derived.tsv is allowed too (the content of the three derived tables); it is admitted by its
+    // exact name rather than by loosening the rule for arbitrary root files.
+    private static final String DERIVED_NAME = "derived.tsv";
+
     private static boolean allowed(String name) {
+        if (name.equals(DERIVED_NAME)) return true;
         for (String prefix : ALLOWED_PREFIXES) if (name.startsWith(prefix)) return true;
         return false;
     }

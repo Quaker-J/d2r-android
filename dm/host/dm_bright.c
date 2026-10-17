@@ -30,9 +30,31 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-static const struct { uint16_t lv; uint8_t act, drlg; int8_t varies; } k_lv[] = {
+// 壳模式：关卡亮度表的**内容**不进程序，启动时从数据包的 derived.tsv 读（标签 BRT）；条数随游戏版本固定，
+// 由 dm_bright_levels.inc 给出（条数不是游戏内容）。换游戏版本时重新生成那个条数（见该文件的注释）。
+// Shell mode: the level table's *content* is not compiled in; it is read from the package's derived.tsv at
+// startup (tag BRT). The count comes from dm_bright_levels.inc and is fixed by the game version (a count is not
+// game content); regenerate it when the game version changes (see the comment in that file).
 #include "dm_bright_levels.inc"
-};
+#include "dm_derived_rt.h"
+typedef struct { uint16_t lv; uint8_t act, drlg; int8_t varies; } bright_level;
+static bright_level k_lv[DM_BRIGHT_COUNT];
+static void k_lv_row(char **f, int n, void *ctx) {
+    int *i = ctx; if (n < 4 || *i >= DM_BRIGHT_COUNT) return;
+    k_lv[*i] = (bright_level){ (uint16_t)atoi(f[0]), (uint8_t)atoi(f[1]), (uint8_t)atoi(f[2]), (int8_t)atoi(f[3]) };
+    (*i)++;
+}
+// 路径在进程启动时就有的平台（Mac / iOS）在加载时填；Android 的 DM_DERIVED 由前端在 boot 里设置，晚于库加载，
+// 所以那边由前端显式调 dm_bright_load()。函数可重复调用（每次从文件重新填）。
+// Platforms whose path exists at process start (Mac / iOS) fill on load; on Android the front end sets DM_DERIVED
+// in boot(), later than library load, so it calls dm_bright_load() explicitly. Calling it again re-reads the file.
+void dm_bright_load(void) {
+    int i = 0; dm_derived_each("BRT", k_lv_row, &i);
+    if (i != DM_BRIGHT_COUNT) fprintf(stderr, "[dm] 【红】关卡亮度表没读全：%d / %d（数据包与 APK 的游戏版本不一致？）\n", i, DM_BRIGHT_COUNT);
+}
+#if !defined(__ANDROID__)
+__attribute__((constructor)) static void k_lv_load(void) { dm_bright_load(); }
+#endif
 
 static int rd(uint64_t a, void *buf, size_t n) { vm_size_t got = 0; return a && !vm_read_overwrite(mach_task_self(), a, n, (vm_address_t)buf, &got) && got == n; }
 static uint64_t main_base(void) { static uint64_t b; if (!b) for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) b = (uint64_t)g_mod[i].base; return b; }

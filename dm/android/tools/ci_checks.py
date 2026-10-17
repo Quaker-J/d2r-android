@@ -79,6 +79,28 @@ def hygiene():
     report("仓库卫生检查（无游戏数据/密钥/存档）", not bad, ", ".join(bad[:5]))
 
 
+def table_stubs():
+    """三张派生表必须是**运行时替身**，不能是真实数据：仓库里不许出现游戏内容。
+    The three derived tables must be **runtime stubs**, never real data: the repository must hold no game content.
+    A real table loses the stub marker and is tens of kilobytes; either way this fails loudly instead of shipping
+    game content in a clean checkout."""
+    expected = (
+        ("dm/host/dm_hud_exp.h", "dm_derived_rt.h"),
+        ("dm/host/dm_vault_tab.h", "dm_derived_rt.h"),
+        ("dm/host/dm_bright_levels.inc", "DM_BRIGHT_COUNT"),
+    )
+    bad = []
+    for relative, marker in expected:
+        path = REPO / relative
+        if not path.is_file():
+            bad.append(relative + "（缺失）")
+        elif marker not in path.read_text(encoding="utf-8", errors="replace"):
+            bad.append(relative + "（不是替身）")
+        elif path.stat().st_size > 64 * 1024:
+            bad.append(relative + "（过大，像真实表）")
+    report("派生表是运行时替身（仓库不含游戏内容）", not bad, ", ".join(bad))
+
+
 def main():
     with tempfile.TemporaryDirectory() as workspace:
         workspace = Path(workspace)
@@ -110,6 +132,7 @@ def main():
             skipped.append("存档包（SaveArchiveTest）：没有项目 JDK（%s）" % JAVAC)
 
         hygiene()
+        table_stubs()
 
         skipped.append("t_thread_leak / t_i18n：依赖 macOS 专有头文件，Linux/CI 上不跑")
         print()

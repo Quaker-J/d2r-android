@@ -110,10 +110,21 @@ def write_entry(archive, source, name, progress):
     return written
 
 
-def assemble(output, game, romfs, shaders, note=None, quiet=False):
+def assemble(output, game, romfs, shaders, derived=None, note=None, quiet=False):
     game_files = collect_game(game)
     romfs_files = collect_romfs(romfs)
     subgroup, shader_files = collect_shaders(shaders)
+    # derived.tsv：三张游戏派生表（编年史仓库 / 经验 / 关卡亮度）的内容。壳模式的 APK 里只有空表与条数，
+    # 内容全从这份文件读 —— 没有它，那三块功能会是空的（运行时打红字）。
+    # derived.tsv: the content of the three game-derived tables (chronicle vault / XP / level brightness). A shell
+    # APK carries only empty tables and their counts and reads the content from this file; without it those three
+    # features stay empty (a red line is printed at run time).
+    if derived is not None:
+        if not derived.is_file():
+            raise PackageError(f"derived table does not exist: {derived}")
+        derived_rows = sum(1 for _ in derived.open(encoding="utf-8"))
+        if derived_rows == 0:
+            raise PackageError(f"derived table is empty: {derived}")
 
     total_romfs = sum(p.stat().st_size for p in romfs_files)
     total_shaders = sum(p.stat().st_size for p in shader_files)
@@ -132,10 +143,13 @@ def assemble(output, game, romfs, shaders, note=None, quiet=False):
         "counts": {"game": len(game_files), "romfs": len(romfs_files), "shaders": len(shader_files)},
         "bytes": {"game": total_game, "romfs": total_romfs, "shaders": total_shaders},
     }
+    if derived is not None:
+        manifest["counts"]["derived"] = derived_rows
+        manifest["bytes"]["derived"] = derived.stat().st_size
 
     written_bytes = 0
     manifest_bytes = (json.dumps(manifest, indent=2, ensure_ascii=False) + "\n").encode()
-    expected_bytes = len(manifest_bytes) + total_game + total_romfs + total_shaders
+    expected_bytes = len(manifest_bytes) + total_game + total_romfs + total_shaders + (derived.stat().st_size if derived is not None else 0)
     last_report = [0]
 
     def progress(count):
@@ -162,6 +176,10 @@ def assemble(output, game, romfs, shaders, note=None, quiet=False):
             write_entry(archive, path, f"romfs/data/{path.name}", progress)
         for path in shader_files:
             write_entry(archive, path, f"shaders/{path.name}", progress)
+        if derived is not None:
+            # 放在包根，前端按 <包>/derived.tsv 找到它并设给宿主（DM_DERIVED）。
+            # At the package root; the front end finds <package>/derived.tsv and hands it to the host (DM_DERIVED).
+            write_entry(archive, derived, "derived.tsv", progress)
     # 全部写完才改名：中断留下的 .part 不会被误当成可用包。
     temporary.replace(output)
     if not quiet:
@@ -194,6 +212,8 @@ def main():
     assemble_parser.add_argument("--game", type=Path, required=True)
     assemble_parser.add_argument("--romfs", type=Path, required=True)
     assemble_parser.add_argument("--shaders", type=Path, required=True)
+    assemble_parser.add_argument("--derived", type=Path, default=None,
+                                 help="runtime table data (derived.tsv) produced by shell_stubs.py data")
     assemble_parser.add_argument("--note", default=None)
 
     inspect_parser = subparsers.add_parser("inspect", help="print a package's manifest without touching it")
@@ -202,7 +222,7 @@ def main():
     args = parser.parse_args()
     try:
         if args.command == "assemble":
-            assemble(args.output, args.game, args.romfs, args.shaders, note=args.note)
+            assemble(args.output, args.game, args.romfs, args.shaders, derived=args.derived, note=args.note)
         else:
             manifest, groups = inspect(args.archive)
             print(json.dumps(manifest, indent=2, ensure_ascii=False))

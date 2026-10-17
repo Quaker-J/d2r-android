@@ -31,8 +31,8 @@ cd "$W/dm/ios" || die "副本里没有 dm/ios"
 t "生成（与平时出包同一步：用本机游戏文件）"; DM_GEN_ONLY=1 DM_IOS_DD="$DD" bash run.sh build > "$O/gen.log" 2>&1 || { tail -5 "$O/gen.log"; die "生成失败，日志 $O/gen.log"; }
 # 三份编进代码的表：真实数据留作对照，源文件换成替身
 # The three tables compiled into the code: the real data is kept as reference, and the source files are replaced with stubs
-python3 tools/shell_stubs.py data "$W/dm" "$O/ref/derived.tsv" || die "拆表失败"
-python3 tools/shell_stubs.py stubs "$W/dm" || die "写替身失败"
+python3 ../tools/shell_stubs.py data "$W/dm" "$O/ref/derived.tsv" || die "拆表失败"
+python3 ../tools/shell_stubs.py stubs "$W/dm" || die "写替身失败"
 # 模块映像不进可执行文件：内嵌汇编清空、去掉它的链接参数；打开装载器的壳分支
 # The module images do not go into the executable: empty the embedded assembly and remove its link flags; turn on the loader's shell branch
 OUT=$(bash ../tools/product.sh path touch) || die "取不到产物目录"

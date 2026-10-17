@@ -3,8 +3,10 @@
 #   关卡的 biome：预设类（DrlgType 2）取 LvlPrest 里本关卡的预设文件 → hd/env/preset/<路径>.json 的 biomeFilename，多数票；
 #                野外类（DrlgType 3）取 LvlTypes 本关卡类型的图块目录 → 该目录下预设 json 的 biomeFilename，多数票；迷宫类（DrlgType 1）不用（规则里一律 k=4）。
 #   随不随昼夜：biome 的 _day 与 _night 画面配置（hd/env/vis）去掉 name / id 后内容是否相同。
-# 用法：gen_bright_levels.py <原版 RomFS（Update）> > dm/host/dm_bright_levels.inc
-# 构建时由 dm/host/Makefile 调，直接读玩家自己的游戏文件；生成的表不进仓库（同 dm_vault_tab.h、dm_hud_exp.h）。
+# 用法：gen_bright_levels.py <原版 RomFS（Update）>            → 运行时替身（只有 DM_BRIGHT_COUNT，构建用）
+#       gen_bright_levels.py <原版 RomFS（Update）> --rows     → 真实数据行（打包器用，进 derived.tsv）
+# 构建时由 dm/host/Makefile 调（默认、条数替身），打包器（make_package.py / d2rm_pack.py）用 --rows。
+# 直接读玩家自己的游戏文件；数据不进仓库（同 dm_vault_tab.h、dm_hud_exp.h）。
 # Generates dm/host/dm_bright_levels.inc: each level id → whether the original game's picture follows day and night (the "indoor" criterion for 3D picture brightening). Everything is derived from the original game's data, no maps are listed by hand:
 #   A level's biome: for preset levels (DrlgType 2) take this level's preset files in LvlPrest → biomeFilename of hd/env/preset/<path>.json, majority vote;
 #                for wilderness levels (DrlgType 3) take the tile directory of this level's type in LvlTypes → biomeFilename of the preset json files under that directory, majority vote; maze levels (DrlgType 1) are not used (the rule gives them k=4 across the board).
@@ -14,8 +16,15 @@
 import csv, io, json, os, re, sys, collections
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'ios', 'tools'))
 import touch_layout
-if len(sys.argv) != 2: sys.exit('用法：gen_bright_levels.py <原版 RomFS（Update）>')
-romfs = sys.argv[1]
+# 两种输出：默认只给**条数**（构建用的替身，内容不进程序，运行时从数据包的 derived.tsv 读）；
+# --rows 给真实数据行（打包器用，再由 shell_stubs.py 拆进 derived.tsv）。
+# Two outputs: by default only the **count** (the build-time stub; the content is not compiled in and is read from
+# the package's derived.tsv at run time); --rows emits the real data rows (the packer uses them, and
+# shell_stubs.py splits them into derived.tsv).
+rows_mode = '--rows' in sys.argv[1:]
+argv = [a for a in sys.argv[1:] if a != '--rows']
+if len(argv) != 1: sys.exit('用法：gen_bright_levels.py <原版 RomFS（Update）> [--rows]')
+romfs = argv[0]
 # 游戏文件清单读一遍建索引（要读上千个小 json，逐个线性查清单太慢）：小写路径 → 清单行
 # Read the game file list once and build an index (over a thousand small json files have to be read, and a linear search of the list for each one is too slow): lowercase path → list line
 IDX = {}
@@ -80,6 +89,12 @@ for r in lv:
     c.pop('', None)
     b = c.most_common(1)[0][0] if c else ''
     out.append((lid, r[iname], dt, int(r[iact] or 0), b, int(varies[b]) if b in varies else -1))
-print('// 由 dm/tools/gen_bright_levels.py 在构建时从玩家自己的游戏文件（Levels / LvlPrest / LvlTypes 与 hd/env 画面配置）生成，勿手改，不进仓库。')
-print('// 每行：关卡号、幕号（Levels.txt Act，0 起）、DrlgType（1 迷宫 2 预设 3 野外）、原版画面随不随昼夜（1 随 / 0 不随 / -1 未找到 biome）——biome、关卡名')
-for lid, name, dt, act, b, v in out: print(f'{{ {lid}, {act}, {dt or 0}, {v} }},   // {b or "（无）"}，{name}')
+if rows_mode:
+    print('// 由 dm/tools/gen_bright_levels.py --rows 从玩家自己的游戏文件（Levels / LvlPrest / LvlTypes 与 hd/env 画面配置）生成，勿手改。')
+    print('// 每行：关卡号、幕号（Levels.txt Act，0 起）、DrlgType（1 迷宫 2 预设 3 野外）、原版画面随不随昼夜（1 随 / 0 不随 / -1 未找到 biome）——biome、关卡名')
+    for lid, name, dt, act, b, v in out: print(f'{{ {lid}, {act}, {dt or 0}, {v} }},   // {b or "（无）"}，{name}')
+else:
+    print('// 壳模式：关卡亮度表的内容不进程序，启动时从数据包的 derived.tsv 读（标签 BRT）。')
+    print('// 由 dm/tools/gen_bright_levels.py 从玩家自己的游戏文件（Levels / LvlPrest / LvlTypes 与 hd/env 画面配置）数出行数生成，勿手改。')
+    print('// 条数随游戏版本固定，不是游戏内容 —— 换游戏版本后要重新生成这个数字。')
+    print('#define DM_BRIGHT_COUNT %d' % len(out))

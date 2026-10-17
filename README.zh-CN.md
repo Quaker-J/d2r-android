@@ -47,13 +47,12 @@ python3 dm/android/tools/ci_checks.py          # 可选：跑与仓库 CI 相同
 - [数据包格式与打包](docs/ANDROID_PACKAGE.zh-CN.md)
 - [启动设置](docs/ANDROID_LAUNCH_SETTINGS.zh-CN.md)
 - [冻结状态、实测范围与已知问题](docs/ANDROID_RELEASE_SNAPSHOT.zh-CN.md)
-- [代码来源与借鉴](docs/ANDROID_SOURCE_PROVENANCE.zh-CN.md)
 - [上游项目原始说明](docs/UPSTREAM_README.zh-CN.md)
 
 ## 依赖与来源
 
 - **上游**：[jhaizhou-ops/d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile)（基线 `2eb5758771f110cd53082b999d88d242766610da`）。保留其 [MIT 许可](LICENSE) 及第三方许可声明。
-- **优化参考**：Eden（Switch 模拟器，参考其渲染与超分做法；其着色器翻译是 GPL-3.0，**不并入**本 MIT 项目）与 LASRecomp。具体采用范围见[来源说明](docs/ANDROID_SOURCE_PROVENANCE.zh-CN.md)。
+- **优化参考**：Eden（Switch 模拟器，参考其渲染与超分做法；其着色器翻译是 GPL-3.0，**不并入**本 MIT 项目）与 LASRecomp。
 - **构建依赖**：Android NDK r28c、JDK 17、Android SDK build-tools / platform 35（`bootstrap.py` 自动安装的版本为准）。
 - **打包游戏数据另需**（只在玩家电脑上）：Python venv（`lz4` / `capstone` 等）、`hactool`、.NET 10 SDK；技能里的前置条件表逐项列出了它们。
 

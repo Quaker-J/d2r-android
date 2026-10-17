@@ -141,11 +141,19 @@ def main():
     # 2. UI assets and a few data tables (same as the beginning of ios/run.sh build)
     say('从游戏文件生成界面素材（输入没变会自己跳过）')
     run([PY, os.path.join(IOS, 'tools', 'gen_assets.py'), romfs], cwd=IOS, env={'DM_ROMFS_SRC': romfs}, log=os.path.join(stage, 'gen_assets.log'), what='生成界面素材')
+    # 三张表生成到打包暂存目录（不再写进源码树：仓库里提交的是运行时替身）。
+    # The three tables are generated into the packaging stage (not into the source tree: the repository holds
+    # runtime stubs).
+    tables = os.path.join(stage, 'tables'); os.makedirs(tables, exist_ok=True)
     for name, gen in (('dm_vault_tab.h', 'gen_vault_table.py'), ('dm_hud_exp.h', 'gen_hud_exp.py')):
         txt = run([PY, os.path.join(IOS, 'tools', gen), romfs], what='生成 ' + name)
-        with open(os.path.join(DM, 'host', name), 'w', encoding='utf-8') as f: f.write(txt)
-    sys.path.insert(0, os.path.join(IOS, 'tools')); import shell_stubs
-    say('数据表：经验 %d、部位 %d、仓库条目 %d、套装 %d、技能索引 %d' % shell_stubs.data(DM, os.path.join(stage, 'dm', 'derived.tsv')))
+        with open(os.path.join(tables, name), 'w', encoding='utf-8') as f: f.write(txt)
+    # 亮度表要 --rows：默认输出只有条数（构建用替身），不能拿来拆表。
+    # The brightness generator needs --rows: its default output is only the count (the build stub).
+    txt = run([PY, os.path.join(DM, 'tools', 'gen_bright_levels.py'), romfs, '--rows'], what='生成 dm_bright_levels.inc')
+    with open(os.path.join(tables, 'dm_bright_levels.inc'), 'w', encoding='utf-8') as f: f.write(txt)
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import shell_stubs
+    say('数据表：经验 %d、部位 %d、仓库条目 %d、套装 %d、技能索引 %d、亮度 %d' % shell_stubs.data(DM, os.path.join(stage, 'dm', 'derived.tsv'), tables))
     hud = os.path.join(IOS, 'Gen', 'assets', 'NativeHUD')
     for d, src in (('hud_v4_ui', os.path.join(hud, 'v4', 'hud_v4_ui')), ('mapgoal', os.path.join(hud, 'mapgoal')), ('mercslots', os.path.join(hud, 'mercslots'))):
         if d + '/' in manifest: shutil.copytree(src, os.path.join(stage, d))

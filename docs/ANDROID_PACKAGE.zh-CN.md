@@ -28,9 +28,10 @@ d2r-package.zip
 │   └── subsdk0.gates.tsv         ┘
 ├── romfs/                        游戏资源（原样）
 │   └── data/*.data, *.psv
-└── shaders/                      翻译后的着色器
-    ├── host-subgroup-size.txt    分组档位，必须与实际 GPU 策略一致
-    └── <key>.spv / <key>.meta
+├── shaders/                      翻译后的着色器
+│   ├── host-subgroup-size.txt    分组档位，必须与实际 GPU 策略一致
+│   └── <key>.spv / <key>.meta
+└── derived.tsv                   三张游戏派生表的内容（壳模式的 APK 里只有空表与条数）
 ```
 
 `manifest.json` 示例：
@@ -41,12 +42,28 @@ d2r-package.zip
   "created": "2026-10-17T01:20:00Z",
   "source": "user-supplied game files",
   "subgroup_size": 64,
-  "counts": { "game": 9, "romfs": 45, "shaders": 20795 },
-  "bytes": { "game": 79436432, "romfs": 8400000000, "shaders": 507000000 }
+  "counts": { "game": 9, "romfs": 45, "shaders": 20795, "derived": 746 },
+  "bytes": { "game": 79436432, "romfs": 8400000000, "shaders": 507000000, "derived": 24000 }
 }
 ```
 
 `format` 是包格式版本。手机端遇到不认识的版本必须**明确报错并拒绝导入**，不能猜。
+
+## derived.tsv：三张游戏派生表（壳模式）
+
+APK 里**不含**三张从游戏文件生成的表的内容（编年史仓库物品表、经验表、关卡亮度表），只带"表有多大"的条数；
+内容全在这份 `derived.tsv` 里，游戏启动时按标签读进去（`dm/host/dm_derived_rt.h`，由前端把路径经 `DM_DERIVED` 交给宿主）：
+
+| 标签 | 内容 |
+| --- | --- |
+| `EXP` | 每行 10 个等级的经验值，共 100 个（经验条） |
+| `VTPART` / `VTROW` / `VTSET` | 编年史仓库的部位名、条目行（部位/档次/行号/等级/套装/图标键）、套装键 |
+| `BRT` | 每行 `关卡号 幕 DrlgType 是否随昼夜`（动态曝光的判据） |
+| `TAROW` | 技能图标索引（iOS 用；Android 包通常没有） |
+
+包**没有** `derived.tsv` 也不会拒收（老包仍能进游戏），但那三块功能会是空的，日志里会有明确的红色告警
+（"数据包没有 derived.tsv" / "表没读全"）。`build_package.py assemble --derived <文件>` 负责把它放进包，
+`make_package.py` 会自动生成它。
 
 ## 手机端怎么用它
 

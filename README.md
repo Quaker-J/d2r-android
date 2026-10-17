@@ -47,13 +47,12 @@ To embed the game code in the APK instead of importing it, first generate the mo
 - [Data package format and packing](docs/ANDROID_PACKAGE.zh-CN.md)
 - [Launch settings](docs/ANDROID_LAUNCH_SETTINGS.zh-CN.md)
 - [Snapshot boundaries and known issues](docs/ANDROID_RELEASE_SNAPSHOT.zh-CN.md)
-- [Source provenance](docs/ANDROID_SOURCE_PROVENANCE.zh-CN.md)
 - [Original upstream README](docs/UPSTREAM_README.md)
 
 ## Dependencies and provenance
 
 - **Upstream**: [jhaizhou-ops/d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile) at `2eb5758771f110cd53082b999d88d242766610da`; its [MIT license](LICENSE) and third-party notices are retained.
-- **Optimization references**: Eden (a Switch emulator; its rendering and upscaling ideas are referenced, but its shader translation is GPL-3.0 and is **not** merged into this MIT project) and LASRecomp. The exact scope is in the [provenance notes](docs/ANDROID_SOURCE_PROVENANCE.zh-CN.md).
+- **Optimization references**: Eden (a Switch emulator; its rendering and upscaling ideas are referenced, but its shader translation is GPL-3.0 and is **not** merged into this MIT project) and LASRecomp.
 - **Build dependencies**: Android NDK r28c, JDK 17, Android SDK build-tools / platform 35 (pinned by `bootstrap.py`).
 - **Packing game data additionally needs** (on the player's PC only): a Python venv (`lz4`, `capstone`, ...), `hactool`, and the .NET 10 SDK; the skill's prerequisites table lists them.
 

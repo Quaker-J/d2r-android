@@ -84,7 +84,9 @@ RomFS和着色器仅首次或资源版本变化时部署；更新APK保留应用
 git tag v0.2 && git push origin v0.2
 ```
 
-**为什么 CI 不构建"带游戏代码"的 APK**：那部分是从玩家自己的游戏文件改写出来的，仓库里没有、也不该进 CI（见 `CONTRIBUTING.zh-CN.md` 的数据边界）。本机要构建内含游戏代码的包，仍按上面的「构建与安装」加 `--game-source`。
+**为什么 CI 的 APK 不含游戏数据（壳模式）**：游戏模块和三张派生表（编年史仓库 / 经验 / 关卡亮度）都得从玩家自己的游戏文件生成，仓库里没有、也不该进 CI（见 `CONTRIBUTING.zh-CN.md` 的数据边界）。所以 APK 走**壳模式**：宿主里只带"表有多大"的条数（`dm/host/dm_vault_tab.h`、`dm_hud_exp.h`、`dm_bright_levels.inc` 是随源码提交的替身），内容在启动时从数据包的 `derived.tsv` 读（路径由前端经 `DM_DERIVED` 交给宿主）。数据包由玩家那边的 `make_package.py` 生成，三张表的内容自动打进包里。这样同一个 APK 谁都能装，数据各用各的。
+
+本机要构建内含游戏代码的包（不依赖导入），仍按上面的「构建与安装」加 `--game-source`；三张表依旧从数据包读。
 
 **本地跑同一组检查**：`python3 dm/android/tools/ci_checks.py`（Linux 上能跑的那部分；`t_thread_leak` / `t_i18n` 依赖 macOS 专有头文件，脚本里会明确列出跳过，而不是假装全绿）。
 

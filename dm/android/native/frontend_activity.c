@@ -237,13 +237,22 @@ static void *boot(void *argument) {
         // A separate variable for the module directory: DM_ANDROID_LIBDIR belongs to the graphics driver's hook
         // lookup, as documented in loader.c.
         setenv("DM_GUEST_LIBDIR",metadata,1);
+        // 三张游戏派生表（编年史仓库 / 经验 / 关联亮度）的内容**不在 APK 里**（壳模式）：由数据包里的 derived.tsv 提供。
+        // 没有它表就空着（会打红字），所以这里把"缺文件"说清楚，而不是让人以为是数据本身的问题。
+        // The three game-derived tables (chronicle vault / XP / level brightness) are **not compiled into the APK**
+        // (shell mode): the package's derived.tsv provides them. Without it the tables stay empty (a red line is
+        // printed), so say the file is missing instead of leaving it looking like a data problem.
+        snprintf(path,sizeof path,"%s/d2r-package/derived.tsv",s->activity->externalDataPath);
+        if(access(path,R_OK)==0){setenv("DM_DERIVED",path,1);LOG("[android] 数据包带 derived.tsv：三张派生表在运行时从它读");}
+        else{unsetenv("DM_DERIVED");LOG("[android] 【红】数据包没有 derived.tsv：编年史仓库 / 经验条 / 动态亮度的表将是空的（用新版打包器重新生成数据包）");}
         LOG("[android] imported package in use game=%s",metadata);
     }else{
         const char *modules[]={"main","sdk","subsdk0"};for(unsigned i=0;i<3;i++)for(unsigned j=0;j<2;j++){char name[80];snprintf(name,sizeof name,"%s.%s.tsv",modules[i],j?"gates":"fixups");copy_asset(s->activity,metadata,name);}
         snprintf(path,sizeof path,"%s/romfs",s->activity->externalDataPath);setenv("DM_ROMFS",path,1);
         snprintf(path,sizeof path,"%s/shaders",s->activity->externalDataPath);setenv("DM_VK_SHADERS",path,1);
         unsetenv("DM_GUEST_LIBDIR");
-        LOG("[android] no imported package; using APK assets and pushed romfs/shaders");
+        unsetenv("DM_DERIVED");
+        LOG("[android] no imported package; using APK assets and pushed romfs/shaders (derived tables will be empty)");
     }
     snprintf(path,sizeof path,"%s/save",s->activity->internalDataPath);mkdir(path,0700);setenv("DM_SAVE",path,1);
     // 私有可重建的驱动缓存独立于游戏存档；不可写时正常使用内存缓存。
@@ -264,6 +273,13 @@ static void *boot(void *argument) {
     setenv("DM_TACT_PREFETCH","0",1);setenv("DM_BOOTPROF","1",1);setenv("DM_DBG","1",1);
     setenv("DM_UIMSG","1",1);setenv("DM_MOVIE","1",1);
     __android_log_print(ANDROID_LOG_INFO,"D2RAndroid","Starting real game host; log: %s",log);atomic_store(&s->started,1);
+    // 三张派生表（编年史仓库 / 经验 / 亮度）在运行时从 derived.tsv 填：路径是上面才定下来的，晚于库加载时的
+    // 构造器，所以这里显式填一次。缺文件时表为空并打红字（不伪造数据）。
+    // The three derived tables (vault / XP / brightness) are filled from derived.tsv at run time: the path is only
+    // known above, later than the load-time constructors, so fill explicitly here. When the file is missing the
+    // tables stay empty and a red line says so (nothing is invented).
+    { void dm_hud_exp_load(void); void dm_vault_load(void); void dm_bright_load(void);
+      dm_hud_exp_load(); dm_vault_load(); dm_bright_load(); }
     char *args[]={"dmhost-android",metadata,"main","sdk","subsdk0",NULL};int dm_main(int,char**);dm_main(5,args);ANativeActivity_finish(s->activity);return NULL;
 }
 void front_run(void (*guest)(void)) {void mtl_init(void);mtl_init();game_app *s=application;if(!pthread_create(&s->debug_thread,NULL,progress_watch,s))s->debug_started=1;guest();}
