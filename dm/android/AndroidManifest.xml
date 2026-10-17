@@ -3,7 +3,10 @@
     <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="35" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-feature android:name="android.hardware.vulkan.version" android:version="0x00401000" android:required="true" />
-    <application android:label="@string/dmAndroidTitle" android:hasCode="false" android:debuggable="true" android:extractNativeLibs="true" android:allowBackup="false">
+    <!-- 图标是仓库里的纯矢量自适应图标（dm/android/res/，项目自画，不含游戏美术）；应用名来自 dmAndroidTitle。 -->
+    <!-- The icon is the repository's pure-vector adaptive icon (dm/android/res/, project art, no game assets);
+         the app name comes from dmAndroidTitle. -->
+    <application android:label="@string/dmAndroidTitle" android:icon="@mipmap/ic_launcher" android:hasCode="false" android:debuggable="true" android:extractNativeLibs="true" android:allowBackup="false">
         <activity android:name="android.app.NativeActivity" android:exported="true" android:screenOrientation="landscape" android:configChanges="orientation|screenSize|keyboardHidden" android:theme="@android:style/Theme.Material.NoActionBar">
             <meta-data android:name="android.app.lib_name" android:value="dmandroid" />
             <intent-filter>

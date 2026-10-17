@@ -79,6 +79,31 @@ def main():
     entry = build / "entry_elf.S"
     run([sys.executable, ROOT / "tools/generate_entry.py", entry])
     run([sys.executable, ROOT / "tools/strings.py", build])
+    # 仓库里的资源（应用图标，纯矢量）复制进构建目录，和 strings.py 生成的字符串一起交给 aapt2；
+    # 构建目录每次重建，所以这里总是从源码复制，不会留下旧图标的残留。
+    # Repository resources (the app icon, pure vectors) are copied into the build directory so aapt2 compiles them
+    # with the generated strings. The build directory is rebuilt each time, so this always comes from the source and
+    # never leaves a stale icon behind.
+    if (ROOT / "res").is_dir():
+        shutil.copytree(ROOT / "res", build / "res", dirs_exist_ok=True)
+    # 图标覆盖（可选，dm/android/local/ 已 gitignore）：把 ic_launcher.* 放进 local/ 就换成本机自己的图，
+    # 与启动背景图同一套约定。位图作为自适应图标的前景层（铺满 108dp 再被系统裁形），建议方形图。
+    # Optional icon override (dm/android/local/ is gitignored): drop an ic_launcher.* there and this build uses it,
+    # the same convention as the launcher backdrop. The bitmap becomes the adaptive icon's foreground layer (it
+    # fills 108dp and the system masks it), so a square image is expected.
+    override = next(iter(sorted((ROOT / "local").glob("ic_launcher.*"))), None)
+    if override is not None:
+        shutil.copyfile(override, build / "res" / "drawable" / ("ic_launcher_custom" + override.suffix.lower()))
+        (build / "res" / "mipmap-anydpi-v26" / "ic_launcher.xml").write_text(
+            '<?xml version="1.0" encoding="utf-8"?>\n'
+            '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n'
+            '    <background android:drawable="@drawable/ic_launcher_background" />\n'
+            '    <foreground android:drawable="@drawable/ic_launcher_custom" />\n'
+            '</adaptive-icon>\n')
+        # 位图没有干净的单色轮廓，覆盖时不提供主题图标层（Android 13 会退回彩色图标）。
+        # A bitmap has no clean monochrome silhouette, so the override ships no themed layer (Android 13 falls back
+        # to the colour icon).
+        shutil.rmtree(build / "res" / "mipmap-anydpi-v33", ignore_errors=True)
     run([sys.executable, ROOT / "tools/make_probe.py", build / "probe", BIN])
     run([sys.executable, ROOT / "tools/build_gpu_driver.py"])
     run([sys.executable, ROOT / "tools/build_gpu_fixtures.py"])

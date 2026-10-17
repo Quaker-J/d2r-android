@@ -75,6 +75,8 @@ RomFS和着色器仅首次或资源版本变化时部署；更新APK保留应用
 
 启动画面背景图随源码发布：`dm/android/artwork/launcher-background.*`，构建时打进 APK 的 `assets/`，所以新电脑 clone 后能重建出同样的 APK。想换自己的图，把同名文件放进 `dm/android/local/`（该目录已 gitignore）即可覆盖，不必改源码。素材明显小于屏幕时代码会先缩小再放大，让放大本身把它柔化成氛围底图；换更大的图就自动变清晰。
 
+应用图标同理但不用改源码：仓库自带一枚纯矢量自适应图标（`dm/android/res/`，深色底 + 金色菱框 + 暗红宝石，项目自画、不含游戏美术）；把 `ic_launcher.png` / `.jpg` / `.webp` 放进 `dm/android/local/` 就会在构建时替换成你自己的图（同目录已 gitignore，图只留在本机）。位图会作为自适应图标的前景层铺满 108dp、再由系统裁成圆角/圆形，所以**请用方形图**，非方图会被拉伸。构建脚本会把 `dm/android/res/` 复制进构建目录后一起交给 aapt2。
+
 构建必须在项目虚拟环境里跑：`build.py` 用 `sys.executable` 派生子进程，而 `patch_nso.py` 需要 venv 里的 `lz4`，用系统 `python3` 会在那一步 `ModuleNotFoundError`。
 
 ## 输入与日志

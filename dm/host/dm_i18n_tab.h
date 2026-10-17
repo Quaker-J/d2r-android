@@ -318,7 +318,7 @@ static const struct { const char *k, *zh, *en; } k_dm_i18n[] = {
     { "dmAppMenuHelp", "帮助", "Help" },
     { "dmAppKeysTitle", "键盘与手柄按键对照", "Keyboard and Controller Buttons" },
     { "dmAppKeysText", "界面上的按键提示是手柄字母，键盘这样对应：\n\n移动：W A S D（左摇杆）\n十字键：方向键\nA 确认：J　　B 返回：K　　X：U　　Y：I\nL：Q　　R：E　　ZL：Z　　ZR：C\n按左摇杆：F　　按右摇杆：G\n＋（菜单）：回车　　−（地图）：Tab\n\n鼠标：左键点目标或界面，右键 = B，滚轮滚列表。\n接上手柄可以直接用。这一页以后在「帮助」菜单里。", "On-screen button hints use controller letters. Keyboard mapping:\n\nMove: W A S D (left stick)\nD-pad: arrow keys\nA confirm: J    B back: K    X: U    Y: I\nL: Q    R: E    ZL: Z    ZR: C\nPress left stick: F    Press right stick: G\n+ (menu): Return    − (map): Tab\n\nMouse: left click a target or the interface, right click = B, wheel scrolls lists.\nA connected controller works right away. This page stays in the Help menu." },
-    { "dmAndroidTitle", "D2R 安卓移植原型", "D2R Android Port" },
+    { "dmAndroidTitle", "暗黑破坏神2", "Diablo II" },
     { "dmAndroidRuntimePass", "运行时测试通过", "Runtime Pass" },
     { "dmAndroidRuntimeFail", "运行时测试失败", "Runtime Fail" },
     { "dmAndroidVulkanActive", "Vulkan 已运行", "Vulkan Active" },
