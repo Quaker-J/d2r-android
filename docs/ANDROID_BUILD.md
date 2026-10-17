@@ -2,6 +2,8 @@
 
 The maintained step-by-step instructions are in [README.zh-CN.md](ANDROID_BUILD.zh-CN.md). See the repository [status](../README.md) and [snapshot boundaries](ANDROID_RELEASE_SNAPSHOT.zh-CN.md).
 
+GitHub Actions (`.github/workflows/build.yml`) builds a **generic APK** on every push (host and frontends, no game code; the game modules come from the package imported on the phone) and a **pack kit** for the player's PC (source + `d2r-package` skill + that APK + a readme). Pushing a `v*` tag publishes a Release carrying both. The APK with embedded game code is still built locally with `--game-source`, because that code derives from the player's own files and stays out of the repository and CI. The portable checks CI runs are the same ones available locally: `python3 dm/android/tools/ci_checks.py`.
+
 Build on Linux x86_64 using `python3 dm/android/tools/bootstrap.py` (NDK r28c, API35, JDK), then install Python dependencies in a virtual environment: `lz4 capstone unicorn numpy pillow zstandard nsz`. Tools default to `~/dm-work/tools/android`; override with `DM_ANDROID_TOOLS`. The build also fetches its pinned `libadrenotools`/`liblinkernsbypass` sources; see [GPU driver notes](ANDROID_GPU_DRIVER.zh-CN.md) for the caches and overrides.
 
 Prepare your own RomFS, rewritten `main`, `sdk` and `subsdk0` modules, and a matching SPIR-V cache. The repository provides `extract_packages.py`, `patch_nso.py` with `DM_TARGET=android`, and `build_shaders.py`; it does not distribute game data, keys or the generated artifacts. Shader translation additionally requires a .NET 10 SDK (default `~/dm-work/tools/dotnet/dotnet`, installable with the official dotnet-install script; the first NuGet restore needs network).

@@ -69,7 +69,14 @@ def main():
     parser.add_argument("--game-run", action="store_true", help="Run the real game host with NVN/Vulkan instead of the diagnostic frontend")
     parser.add_argument("--shader-cache", type=Path, default=Path.home() / "dm-work/build/android/shaders/spirv")
     args = parser.parse_args()
-    if args.game_run and not args.game_source: parser.error("--game-run requires --game-source")
+    if args.game_source and not args.game_run: parser.error("--game-source only makes sense with --game-run")
+    if args.game_run and not args.game_source:
+        # 没有游戏源码也照样出 APK：宿主与前端完整，**游戏模块由手机端导入的数据包提供**（启动界面本来就要
+        # 先导入才能启动）。CI 用它产出可下载的通用 APK；本机带 --game-source 时照旧把游戏代码打进包里。
+        # Without game sources an APK is still produced: host and frontends are complete and the **game modules
+        # come from the package imported on the phone** (the launcher already refuses to start without one). CI
+        # ships this generic APK; a local build with --game-source still embeds the game code.
+        print("Package-only build: game modules come from the imported package", flush=True)
     build = ROOT / "build"
     build.mkdir(exist_ok=True)
     if args.game_run: build_counter_timestamp(build)

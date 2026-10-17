@@ -67,6 +67,27 @@ adb -s "$ANDROID_SERIAL" shell am start -n org.d2r.android.port/.LauncherActivit
 
 RomFS和着色器仅首次或资源版本变化时部署；更新APK保留应用数据。首次无存档会进入建角界面。存档位于应用私有 `files/save/`，不要用其他设备存档覆盖现有角色。驱动与启动配置见[驱动说明](ANDROID_GPU_DRIVER.zh-CN.md)和[启动设置](ANDROID_LAUNCH_SETTINGS.zh-CN.md)。
 
+## 自动流水线（GitHub Actions）
+
+`.github/workflows/build.yml` 在每次 push / PR 上跑，产出两个可下载的制品：
+
+| 制品 | 内容 |
+| --- | --- |
+| `D2R-Android-port.apk` | **通用 APK**：宿主与前端完整，但**不含游戏代码**（15 MB 量级）。游戏模块由手机端导入的数据包提供；启动界面本来就要求先导入才能启动。真机验证过：装上它 + 导入数据包即可进游戏。 |
+| `d2r-package-kit-<版本>.zip` | 给玩家电脑用的**打包套件**：项目源码（打包工具在里面）+ `.claude/skills/d2r-package/` 技能 + 上面那个 APK + 一页说明。解压后把文件夹交给 AI 助手即可。 |
+
+流程：`checkout → bootstrap.py 装工具链（NDK/JDK/build-tools，约 800 MB，按 bootstrap.py 内容缓存）→ ci_checks.py → build.py --game-run（不带 --game-source，即"通用包"）→ make_kit.py → 上传制品`。
+
+**发布给玩家**：推一个 tag 即可，流水线会建 Release 并把 APK 与套件挂上去：
+
+```bash
+git tag v0.2 && git push origin v0.2
+```
+
+**为什么 CI 不构建"带游戏代码"的 APK**：那部分是从玩家自己的游戏文件改写出来的，仓库里没有、也不该进 CI（见 `CONTRIBUTING.zh-CN.md` 的数据边界）。本机要构建内含游戏代码的包，仍按上面的「构建与安装」加 `--game-source`。
+
+**本地跑同一组检查**：`python3 dm/android/tools/ci_checks.py`（Linux 上能跑的那部分；`t_thread_leak` / `t_i18n` 依赖 macOS 专有头文件，脚本里会明确列出跳过，而不是假装全绿）。
+
 ## 启动界面
 
 包的入口是 `org.d2r.android.port.LauncherActivity`（Java），游戏本体是它启动的第二个页面 `D2RActivity`（不导出）。清单由 `build.py` 从仓库清单改写而来：替换必须正好命中一个 NativeActivity 块，否则直接报错退出；探针构建没有 dex，所以仍用纯原生清单、不出现 Java 页面。

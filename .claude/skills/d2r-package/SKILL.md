@@ -61,6 +61,28 @@ description: 用玩家自己的游戏文件和密钥生成一个可导入的 And
 导入会解到应用外部私有目录的 `d2r-package/`，**解完最后才写 `manifest.json`**，所以中途失败不会让游戏读到半个包。
 游戏启动时按"有没有 manifest.json"决定用导入的数据还是回落到默认位置。
 
+### 用 adb 直接装到手机（能连上数据线或无线调试时，先问用户愿不愿意）
+
+玩家下载到的套件（`d2r-package-kit-*.zip`）根目录里就有 `D2R-Android-port.apk`；
+在仓库里工作时它是 `dm/android/build/D2R-Android-port.apk`。确认其中哪一个存在后用：
+
+```bash
+# 1) 让用户在手机上开「开发者选项 → USB 调试」（或「无线调试」并给出配对码），然后确认连接：
+adb devices                      # 出现 unauthorized 就让用户在手机上点「允许」
+# 2) 安装应用（这个 APK 不含游戏代码，游戏数据由下面的包提供）：
+adb install -r <上面确认过的 APK 路径>
+# 3) 把数据包推到手机（文件选择器能看到的位置）：
+adb push <包路径> /sdcard/Download/d2r-package.zip
+# 4) 打开启动界面，剩下的由用户在手机上点：
+adb shell am start -n org.d2r.android.port/.LauncherActivity
+```
+
+第 4 步之后，请用户在启动界面点「导入数据包」→ 选 `Download/d2r-package.zip` → 导入完成后点「启动游戏」。
+**最后这两下必须由用户在手机上点**：系统文件选择器不接受 adb 代选，包要由用户选一次，应用才会把它原子换入。
+**不要**用 `run-as` 手工往私有目录塞文件来"跳过导入" —— 那会绕过原子换入，失败时可能留下半个包。
+
+如果 `adb devices` 里什么都没有：先问用户线是否插好 / 无线调试是否在同一网络，别自己反复重连。
+
 ## 边界（务必遵守）
 
 - **密钥绝不写进日志、包或仓库**。`extract_packages.py` 已经刻意不回显密钥相关输出，别在它外面再打一遍。
