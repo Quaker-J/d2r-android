@@ -29,6 +29,12 @@ typedef struct cached_buffer { vk_buffer buffer; struct cached_buffer *next; } c
 static cached_buffer *buffer_cache;
 static pthread_mutex_t buffer_cache_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t buffer_cache_bytes, buffer_allocations, buffer_reuses, snapshot_bytes, active_buffer_bytes, buffer_activation;
+// 只读探针：新建一个缓冲（vkCreateBuffer + 分配显存 + 绑定 + 映射）累计花掉的墙钟与线程 CPU。
+// 用途是**先证实**"重场面下每帧上百次新建"到底吃掉多少帧时间，再决定怎么优化；只多取两次时钟，不改变行为。
+// Read-only probe: wall clock and thread CPU accumulated inside creating a buffer (vkCreateBuffer + allocate +
+// bind + map). Its purpose is to establish, before any optimisation, how much of a frame the hundred-plus
+// creations in a heavy scene actually cost. Two extra clock reads on that path; nothing else changes.
+static uint64_t buffer_create_wall_ns, buffer_create_cpu_ns;
 typedef struct read_snapshot { uintptr_t address; uint64_t stamp, used,incarnation,last_acquired; unsigned gpu_only; vk_buffer buffer; struct read_snapshot *next,*prev,*hash_next; } read_snapshot;
 static read_snapshot *read_snapshots,*read_snapshot_tail,*read_index[8192];
 static uint64_t read_cache_bytes, read_cache_clock, read_cache_hits, read_cache_misses, immutable_buffer_bytes;
@@ -420,6 +426,7 @@ static vk_buffer buffer_create(uint64_t size) {
         atomic_store(&b.owner->references,1);b.owner->activation=activation;pthread_mutex_unlock(&buffer_cache_lock); free(entry); b.size = size; return b; }
     buffer_allocations++; active_buffer_bytes += capacity; pthread_mutex_unlock(&buffer_cache_lock);
     vk_buffer b = {.size = size, .capacity = capacity};b.owner=calloc(1,sizeof *b.owner);if(!b.owner)die("Vulkan buffer ownership allocation");atomic_init(&b.owner->references,1);b.owner->activation=activation;
+    uint64_t probe_wall = dm_android_clock_ns(CLOCK_MONOTONIC), probe_cpu = dm_android_clock_ns(CLOCK_THREAD_CPUTIME_ID);
     VkBufferCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = capacity, .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
     VK_CHECK(vkCreateBuffer(device, &ci, NULL, &b.buffer));
     VkMemoryRequirements req; vkGetBufferMemoryRequirements(device, b.buffer, &req);
@@ -429,7 +436,10 @@ static vk_buffer buffer_create(uint64_t size) {
     if (type == UINT32_MAX) die("Vulkan has no coherent host-visible buffer memory");
     VkMemoryAllocateInfo mi = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size, .memoryTypeIndex = type};
     VK_CHECK(vkAllocateMemory(device, &mi, NULL, &b.memory)); VK_CHECK(vkBindBufferMemory(device, b.buffer, b.memory, 0));
-    VK_CHECK(vkMapMemory(device, b.memory, 0, VK_WHOLE_SIZE, 0, &b.mapped)); return b;
+    VK_CHECK(vkMapMemory(device, b.memory, 0, VK_WHOLE_SIZE, 0, &b.mapped));
+    buffer_create_wall_ns += dm_android_clock_ns(CLOCK_MONOTONIC) - probe_wall;
+    buffer_create_cpu_ns += dm_android_clock_ns(CLOCK_THREAD_CPUTIME_ID) - probe_cpu;
+    return b;
 }
 // 跨批消费者持有同一 backing 的引用，到最后一个真正完成的使用者才允许缓存复用。
 // Cross-batch consumers retain the same backing until the last genuinely completed user permits cache reuse.
@@ -947,7 +957,7 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
         for (uint64_t i = 0; i < (uint64_t)w * h; ++i) { fwrite(pixels + i * 4, 1, 3, file); nonblack += !!(pixels[i * 4] | pixels[i * 4 + 1] | pixels[i * 4 + 2]); }
         fclose(file); free(pixels); LOG("[vulkan] game frame %llu capture=%s nonblack=%llu draws=%llu", (unsigned long long)ticket, path, (unsigned long long)nonblack, (unsigned long long)draw_count);
     }
-    static uint64_t perf_time,perf_submit,perf_bytes,perf_allocations,perf_hits,perf_passes,perf_barriers;
+    static uint64_t perf_time,perf_submit,perf_bytes,perf_allocations,perf_hits,perf_passes,perf_barriers,perf_create_wall,perf_create_cpu;
     static double perf_gpu,perf_wait;
     uint64_t now=dm_android_clock_ns(CLOCK_MONOTONIC);
     pthread_mutex_lock(&queue_lock);snapshot_diag_poll();gpu_snapshot_report();dependencies_report();counter_gpu_report();graphics_pipeline_report();pipeline_disk_poll();double current_gpu=gpu_total_ns,current_wait=fence_wait_total_ns;
@@ -956,8 +966,8 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
         LOG("[vulkan-driver-table] frame=%llu fast_hits/frame=%.1f builds/frame=%.1f avoided_table_MiB/frame=%.3f avoided_clear_MiB/frame=%.3f",(unsigned long long)ticket,(uniform_driver_fast_hits-driver_fast_previous)/(double)frames,(uniform_driver_builds-driver_build_previous)/(double)frames,(uniform_driver_avoided_bytes-driver_bytes_previous)/(frames*1048576.),(uniform_clear_avoided_bytes-driver_clear_previous)/(frames*1048576.));}
         driver_fast_previous=uniform_driver_fast_hits;driver_build_previous=uniform_driver_builds;driver_bytes_previous=uniform_driver_avoided_bytes;driver_clear_previous=uniform_clear_avoided_bytes;}
     pthread_mutex_unlock(&queue_lock);
-    if(ticket==1){perf_time=now;perf_submit=atomic_load(&submitted);perf_bytes=snapshot_bytes;perf_allocations=buffer_allocations;perf_hits=read_cache_hits;}
-    else if(ticket%60==0){unsigned frames=ticket==60?59:60;LOG("[vulkan-perf] frame=%llu fps=%.2f submits/frame=%.1f snapshots/frame=%.1f MB allocations/frame=%.1f vertex_hits=%llu cache=%llu MB",(unsigned long long)ticket,frames*1e9/(now-perf_time),(double)(atomic_load(&submitted)-perf_submit)/frames,(double)(snapshot_bytes-perf_bytes)/(frames*1048576.),(double)(buffer_allocations-perf_allocations)/frames,(unsigned long long)(read_cache_hits-perf_hits),(unsigned long long)(read_cache_bytes>>20));perf_time=now;perf_submit=atomic_load(&submitted);perf_bytes=snapshot_bytes;perf_allocations=buffer_allocations;perf_hits=read_cache_hits;}
+    if(ticket==1){perf_time=now;perf_submit=atomic_load(&submitted);perf_bytes=snapshot_bytes;perf_allocations=buffer_allocations;perf_hits=read_cache_hits;perf_create_wall=buffer_create_wall_ns;perf_create_cpu=buffer_create_cpu_ns;}
+    else if(ticket%60==0){unsigned frames=ticket==60?59:60;LOG("[vulkan-perf] frame=%llu fps=%.2f submits/frame=%.1f snapshots/frame=%.1f MB allocations/frame=%.1f new_buf_wall_ms/frame=%.3f new_buf_cpu_ms/frame=%.3f vertex_hits=%llu cache=%llu MB",(unsigned long long)ticket,frames*1e9/(now-perf_time),(double)(atomic_load(&submitted)-perf_submit)/frames,(double)(snapshot_bytes-perf_bytes)/(frames*1048576.),(double)(buffer_allocations-perf_allocations)/frames,(double)(buffer_create_wall_ns-perf_create_wall)/(frames*1e6),(double)(buffer_create_cpu_ns-perf_create_cpu)/(frames*1e6),(unsigned long long)(read_cache_hits-perf_hits),(unsigned long long)(read_cache_bytes>>20));perf_time=now;perf_submit=atomic_load(&submitted);perf_bytes=snapshot_bytes;perf_allocations=buffer_allocations;perf_hits=read_cache_hits;perf_create_wall=buffer_create_wall_ns;perf_create_cpu=buffer_create_cpu_ns;}
     if(ticket==1){perf_gpu=current_gpu;perf_wait=current_wait;}
     else if(ticket%60==0){unsigned frames=ticket==60?59:60;LOG("[vulkan-time] frame=%llu GPU=%.2f ms/frame fence_wait=%.2f ms/frame (GPU batch spans; exclude present/vsync)",(unsigned long long)ticket,batch_times?(current_gpu-perf_gpu)/(frames*1e6):-1,(current_wait-perf_wait)/(frames*1e6));perf_gpu=current_gpu;perf_wait=current_wait;}
     if(ticket==1){perf_passes=render_passes;perf_barriers=image_barriers;}

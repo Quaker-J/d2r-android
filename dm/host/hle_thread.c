@@ -469,9 +469,22 @@ int svc_thread(int num, uint64_t *regs) {
             while (guest_ns() < deadline) { struct timespec ts = {0, 1000000}; nanosleep(&ts, 0); }
         } else if (ns > 0) { struct timespec ts = {ns / 1000000000, ns % 1000000000}; nanosleep(&ts, 0); }
         else {   // 让出（0 / -1 / -2）。主线程的让出次数与耗时记账：游戏渲染任务图「等全部做完」是纯轮询 + 让出（main+0x15ee898），量它占一帧多少 | Yield (0 / -1 / -2). Count and time of the main thread's yields are recorded: the game's render task graph "wait for everything to finish" is pure polling + yield (main+0x15ee898); measure how much of a frame it takes
+            // 安卓上实测主线程每帧让出 270 次以上。裸 sched_yield 在这里是反效果的：它把主线程每帧几百次推回
+            // 调度队列，而它等的恰恰是那些被它挤走的工作线程 —— 让出得越频繁，对工作线程越没帮助。
+            // 所以短等待仍走原来的快路，只有**同一线程在 16 ms 内让出超过 16 次**时，才插一次 100 µs 的
+            // nanosleep 把 CPU 真正交出去。正常帧远低于这个阈值，行为不变。
+            // Measured on Android: the main thread yields 270+ times per frame. A bare sched_yield is
+            // counterproductive here, pushing the main thread back into the scheduler hundreds of times a frame
+            // while what it waits for is the very worker threads it displaces. So short waits keep the original
+            // fast path, and only a thread that has yielded more than 16 times inside 16 ms inserts one 100 µs
+            // nanosleep to genuinely hand the CPU over. Ordinary frames stay far below that threshold.
             thr_t *me = pthread_getspecific(g_keythr);
-            if (me && me->handle == 0x1001) { uint64_t y0 = now_ns(); sched_yield(); g_main_yield_ns += now_ns() - y0; g_main_yield_n++; }
+            static _Thread_local struct { uint64_t window; unsigned count; } yield_backoff;
+            uint64_t y0 = now_ns();
+            if (!yield_backoff.window || y0 - yield_backoff.window > 16000000ull) { yield_backoff.window = y0; yield_backoff.count = 0; }
+            if (++yield_backoff.count > 16) { struct timespec gap = {0, 100000}; nanosleep(&gap, 0); }
             else sched_yield();
+            if (me && me->handle == 0x1001) { g_main_yield_ns += now_ns() - y0; g_main_yield_n++; }
         }
         if (g_flag.bootprof) { uint64_t d = now_ns() - t0; dm_prof_add(PROF_SLEEP, d, 0); thr_t *me = pthread_getspecific(g_keythr); if (me && me->handle == 0x1001) dm_prof_add(PROF_MAIN_WAIT, d, 0); }
         return 1;
