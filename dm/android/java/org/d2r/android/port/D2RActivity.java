@@ -85,7 +85,12 @@ public final class D2RActivity extends NativeActivity {
     }
 
     @Override public void onBackPressed() {
-        if (menuPopup != null && menuPopup.isShowing()) hideMenu(); else showMenu();
+        // 日志进 logcat（tag 与项目其它 Java 诊断一致）：出问题时能分辨"没被调用"还是"调用了没显示"。
+        // Logged to logcat (same tag as the project's other Java diagnostics) so a failure can be told apart as
+        // "never called" versus "called but nothing showed".
+        boolean showing = menuPopup != null && menuPopup.isShowing();
+        Log.i("D2RAndroid", "[menu] back pressed, showing=" + showing);
+        if (showing) hideMenu(); else showMenu();
     }
 
     private void showMenu() {
@@ -93,11 +98,14 @@ public final class D2RActivity extends NativeActivity {
         updateMenuLabels();
         setMenuOpen(true);
         menuPopup.showAtLocation(getWindow().getDecorView(), Gravity.END | Gravity.CENTER_VERTICAL, 0, 0);
+        Log.i("D2RAndroid", "[menu] shown isShowing=" + menuPopup.isShowing()
+                + " width=" + menuPopup.getWidth() + " height=" + menuPopup.getHeight());
     }
 
     private void hideMenu() {
         if (menuPopup != null && menuPopup.isShowing()) menuPopup.dismiss();
         setMenuOpen(false);   // 菜单收起就放开输入，免得菜单关掉后手柄还按不动 | releasing the input block on close
+        Log.i("D2RAndroid", "[menu] hidden");
     }
 
     private TextView menuRow() {
@@ -138,7 +146,7 @@ public final class D2RActivity extends NativeActivity {
         // 退出走 finish()：与按返回键退出同一条路（先请游戏存盘、再释放窗口、再结束进程）。
         // Exit goes through finish(): the same path the back key used to take (ask the game to save, release the
         // window, then end the process).
-        exitRow.setOnClickListener(v -> { hideMenu(); finish(); });
+        exitRow.setOnClickListener(v -> { Log.i("D2RAndroid", "[menu] exit row tapped"); hideMenu(); finish(); });
         column.addView(exitRow);
         menuPopup = new PopupWindow(column, LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT, true);
         // 透明背景 + 可点外面：点菜单以外的地方就收起；焦点交给菜单，这样返回键先被菜单吃掉。
