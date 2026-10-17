@@ -367,3 +367,14 @@ dmAndroidLaunchResolution	分辨率	Resolution	Android 启动界面
 dmAndroidLaunchFollowProfile	跟随档位	Follow profile	Android 启动界面
 dmAndroidLaunchNeedsImport	还没有数据包，请先导入再启动游戏	No package yet; import one before starting the game	Android 启动界面
 dmAndroidLaunchPending	数据包由电脑端生成（见 docs/ANDROID_PACKAGE.zh-CN.md），导入后即可启动	The package is produced on a PC (see docs/ANDROID_PACKAGE.zh-CN.md); import it to start	Android 启动界面
+dmAndroidMenuTitle	游戏菜单	Game menu	Android 游戏内菜单
+dmAndroidMenuOverlay	帧率显示	Frame rate display	Android 游戏内菜单
+dmAndroidMenuControls	虚拟摇杆	On-screen controls	Android 游戏内菜单
+dmAndroidMenuQuality	画质	Quality	Android 游戏内菜单
+dmAndroidMenuExit	退出游戏	Exit game	Android 游戏内菜单
+dmAndroidMenuOn	开	On	Android 游戏内菜单
+dmAndroidMenuOff	关	Off	Android 游戏内菜单
+dmAndroidMenuQualityAuto	自动	Auto	Android 游戏内菜单
+dmAndroidMenuQualityHigh	高质量	High	Android 游戏内菜单
+dmAndroidMenuQualityBalanced	平衡	Balanced	Android 游戏内菜单
+dmAndroidMenuQualityPerformance	性能	Performance	Android 游戏内菜单

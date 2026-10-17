@@ -20,9 +20,11 @@ import android.view.Display;
 import android.view.InputDevice;
 import android.util.Log;
 import android.widget.EditText;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.FrameLayout;
 import android.widget.PopupWindow;
+import java.io.File;
 import android.view.Gravity;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
@@ -47,6 +49,120 @@ public final class D2RActivity extends NativeActivity {
     static volatile boolean hostRunning;
     private static native void onTextResult(long request, String text, boolean accepted);
     private static native void onTouchPad(long buttons, int leftX, int leftY, int rightX, int rightY);
+    private static native void setOverlayEnabled(boolean enabled);
+    private static native void setQualityPreset(int preset);
+    private static native void setMenuOpen(boolean open);
+
+    // ---------- 游戏内菜单（返回键呼出，照 Eden 那样）----------
+    // 返回键在安卓上默认结束当前页面，而本移植里结束游戏页面 = 结束整个进程（一个进程只跑一个游戏）；
+    // 横屏gesture导航下"边缘内滑"极易误触，一下就整局退出。所以返回键改成呼出这个菜单：
+    // 帧率显示 / 虚拟摇杆 / 画质 / 退出游戏。再按一次返回（或点菜单外面）收起。
+    // The in-game menu, opened with the system back key (as Eden does). Back ends the page by default, and here
+    // ending the game page ends the whole process (one guest per process), while an edge swipe in landscape is very
+    // easy to hit by accident and would quit the whole run. So back opens this menu instead: frame rate display /
+    // on-screen controls / quality / exit game. Press back again (or tap outside) to close it.
+    private PopupWindow menuPopup;
+    private TextView menuOverlayRow, menuControlsRow, menuQualityRow;
+    private boolean overlayEnabled = true;
+    private boolean controlsEnabled = true;
+    private int qualityPreset;                                  // 0 自动 / 1 高质量 / 2 平衡 / 3 性能 | 0 auto / 1 high / 2 balanced / 3 performance
+    private static final int[] QUALITY_LEVELS = {-1, 0, 1, 2};   // 与 native 约定：-1 自动、0 高、1 平衡、2 性能 | the native contract
+    private static final String[] QUALITY_KEYS = {"dmAndroidMenuQualityAuto", "dmAndroidMenuQualityHigh", "dmAndroidMenuQualityBalanced", "dmAndroidMenuQualityPerformance"};
+    // 与启动界面同一套配色（那边是 GOLD/PARCHMENT），菜单里照用，视觉上是一家人。
+    // The same palette as the launcher (GOLD/PARCHMENT there), so the menu looks like part of the same app.
+    private static final int GOLD = 0xffe8c078;
+    private static final int PARCHMENT = 0xffe8e0d0;
+
+    private String text(String key) {
+        int resource = getResources().getIdentifier(key, "string", getPackageName());
+        return resource == 0 ? key : getString(resource);
+    }
+
+    private File configFile() {
+        File directory = new File(getFilesDir(), "temp");
+        if (!directory.isDirectory() && !directory.mkdirs()) return null;
+        return new File(directory, "launch-settings.conf");
+    }
+
+    @Override public void onBackPressed() {
+        if (menuPopup != null && menuPopup.isShowing()) hideMenu(); else showMenu();
+    }
+
+    private void showMenu() {
+        if (menuPopup == null) buildMenu();
+        updateMenuLabels();
+        setMenuOpen(true);
+        menuPopup.showAtLocation(getWindow().getDecorView(), Gravity.END | Gravity.CENTER_VERTICAL, 0, 0);
+    }
+
+    private void hideMenu() {
+        if (menuPopup != null && menuPopup.isShowing()) menuPopup.dismiss();
+        setMenuOpen(false);   // 菜单收起就放开输入，免得菜单关掉后手柄还按不动 | releasing the input block on close
+    }
+
+    private TextView menuRow() {
+        float density = getResources().getDisplayMetrics().density;
+        TextView view = new TextView(this);
+        view.setTextColor(PARCHMENT);
+        view.setTextSize(17);
+        view.setPadding((int)(10 * density), (int)(9 * density), (int)(10 * density), (int)(9 * density));
+        view.setClickable(true);
+        return view;
+    }
+
+    private void buildMenu() {
+        float density = getResources().getDisplayMetrics().density;
+        LinearLayout column = new LinearLayout(this);
+        column.setOrientation(LinearLayout.VERTICAL);
+        column.setBackgroundColor(0xf0131317);
+        column.setPadding((int)(20 * density), (int)(16 * density), (int)(20 * density), (int)(16 * density));
+        TextView title = new TextView(this);
+        title.setText(text("dmAndroidMenuTitle"));
+        title.setTextColor(GOLD);
+        title.setTextSize(19);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setPadding((int)(10 * density), 0, (int)(10 * density), (int)(4 * density));
+        column.addView(title);
+        menuOverlayRow = menuRow();
+        menuOverlayRow.setOnClickListener(v -> { overlayEnabled = !overlayEnabled; setOverlayEnabled(overlayEnabled); persistOverlay(); updateMenuLabels(); });
+        column.addView(menuOverlayRow);
+        menuControlsRow = menuRow();
+        menuControlsRow.setOnClickListener(v -> { controlsEnabled = !controlsEnabled; updateTouchVisibility(); updateMenuLabels(); });
+        column.addView(menuControlsRow);
+        menuQualityRow = menuRow();
+        menuQualityRow.setOnClickListener(v -> { qualityPreset = (qualityPreset + 1) % QUALITY_KEYS.length; setQualityPreset(QUALITY_LEVELS[qualityPreset]); updateMenuLabels(); });
+        column.addView(menuQualityRow);
+        TextView exitRow = menuRow();
+        exitRow.setTextColor(GOLD);
+        exitRow.setText(text("dmAndroidMenuExit"));
+        // 退出走 finish()：与按返回键退出同一条路（先请游戏存盘、再释放窗口、再结束进程）。
+        // Exit goes through finish(): the same path the back key used to take (ask the game to save, release the
+        // window, then end the process).
+        exitRow.setOnClickListener(v -> { hideMenu(); finish(); });
+        column.addView(exitRow);
+        menuPopup = new PopupWindow(column, LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT, true);
+        // 透明背景 + 可点外面：点菜单以外的地方就收起；焦点交给菜单，这样返回键先被菜单吃掉。
+        // Transparent background plus outside-touchable: tapping elsewhere closes it, and giving the popup focus is
+        // what lets it consume the back key first.
+        menuPopup.setBackgroundDrawable(new ColorDrawable(0));
+        menuPopup.setOutsideTouchable(true);
+        menuPopup.setOnDismissListener(() -> setMenuOpen(false));
+    }
+
+    private void updateMenuLabels() {
+        if (menuOverlayRow == null) return;
+        String on = text("dmAndroidMenuOn"), off = text("dmAndroidMenuOff");
+        menuOverlayRow.setText(text("dmAndroidMenuOverlay") + "：" + (overlayEnabled ? on : off));
+        menuControlsRow.setText(text("dmAndroidMenuControls") + "：" + (controlsEnabled ? on : off));
+        menuQualityRow.setText(text("dmAndroidMenuQuality") + "：" + text(QUALITY_KEYS[qualityPreset]));
+    }
+
+    // 「帧率显示」写回配置：重启后还记得（native 启动时读 DM_DEBUG_OVERLAY）。
+    // "Frame rate display" is written back so a restart remembers it (native reads DM_DEBUG_OVERLAY at startup).
+    private void persistOverlay() {
+        File file = configFile();
+        if (file != null) LaunchSettings.write(file, "debug_overlay", overlayEnabled ? "1" : "0");
+    }
 
     // 电池读数由框架提供（system_server 读内核节点、经 Binder 返回），应用不需要 root；
     // 直接读 /sys/class/power_supply/battery/current_now 才会被 SELinux 拒绝。
@@ -140,6 +256,11 @@ public final class D2RActivity extends NativeActivity {
         // 标记与活动的「创建 / 销毁」这一对绑定，语义就是"这个进程里还住着一个游戏活动"。
         // The flag is paired with activity creation/destruction: it means "a game activity still lives in this process".
         hostRunning = true;
+        // 菜单里「帧率显示」的当前值：与 native 启动时读的是同一个键，**缺省关闭**（只有明确写 1 才是开）。
+        // The menu's "frame rate display" starts from the same key native reads at startup; **off by default**
+        // (only an explicit 1 means on).
+        String overlaySetting = LaunchSettings.read(configFile(), "debug_overlay");
+        overlayEnabled = overlaySetting != null && overlaySetting.equals("1");
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING);
         debugView = new TextView(this);
         debugView.setTypeface(Typeface.MONOSPACE);
@@ -181,7 +302,7 @@ public final class D2RActivity extends NativeActivity {
 
     private void updateTouchVisibility() {
         if (touchControls != null)
-            touchControls.setVisible(activityResumed && hasWindowFocus() && textDialog == null && !physicalController);
+            touchControls.setVisible(controlsEnabled && activityResumed && hasWindowFocus() && textDialog == null && !physicalController);
     }
 
     // 手柄是否接入。只认 SOURCE_GAMEPAD / SOURCE_JOYSTICK，避免把触屏、遥控器也算成手柄。

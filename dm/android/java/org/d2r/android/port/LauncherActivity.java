@@ -84,26 +84,6 @@ public final class LauncherActivity extends Activity {
     // receipts were never produced, and the overwrite was the last thing found.
     private static final String[] OWNED_KEYS = {"debug_overlay", "operation_mode", "resolution"};
 
-    // 读出文件里不归我们管的行，原样带上（不改变取值，只保证不被抹掉）。
-    // Lines in the file we do not own, carried over verbatim (values untouched, they are merely kept from vanishing).
-    private String foreignLines() {
-        StringBuilder kept = new StringBuilder();
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
-                new FileInputStream(configFile()), StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                int equals = line.indexOf('=');
-                if (equals <= 0) continue;                                  // 空行与注释由上面自己写 | blank lines and comments are written above
-                String key = line.substring(0, equals).trim();
-                if (key.isEmpty() || key.startsWith("#")) continue;
-                boolean owned = false;
-                for (String ownedKey : OWNED_KEYS) if (ownedKey.equals(key)) { owned = true; break; }
-                if (!owned) kept.append(line.trim()).append('\n');
-            }
-        } catch (IOException ignored) { }
-        return kept.toString();
-    }
-
     // 游戏还活着时启动界面立刻让位。
     // 从桌面点图标回来时，安卓会在**游戏上面**再开一个启动界面（启动界面是本应用的入口活动），玩家看到的是启动界面、
     // 像是"游戏没了"；再点一次「启动游戏」就会开第三个活动，把中间那个游戏活动销毁 —— 而销毁游戏活动在本项目里等于
@@ -154,21 +134,6 @@ public final class LauncherActivity extends Activity {
 
     // 只做最简单的 key=value 读取；权威解析在 native 的 launch_settings.c。
     // Minimal key=value read; the authoritative parser is launch_settings.c on the native side.
-    private String read(File file, String key) {
-        if (!file.isFile()) return null;
-        try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                int separator = line.indexOf('=');
-                if (separator <= 0) continue;
-                if (line.substring(0, separator).trim().equals(key)) return line.substring(separator + 1).trim();
-            }
-        } catch (IOException ignored) {
-        }
-        return null;
-    }
-
     private void write(File file, String content) {
         try (OutputStreamWriter writer = new OutputStreamWriter(
                 new FileOutputStream(file, false), StandardCharsets.UTF_8)) {
@@ -209,7 +174,7 @@ public final class LauncherActivity extends Activity {
     }
 
     private String importLabel() {
-        String summary = read(stateFile(), "package_summary");
+        String summary = LaunchSettings.read(stateFile(), "package_summary");
         return summary == null ? text("dmAndroidLaunchImport") + "：" + text("dmAndroidLaunchNotSet")
                                : String.format(text("dmAndroidLaunchImported"), summary);
     }
@@ -237,9 +202,12 @@ public final class LauncherActivity extends Activity {
     // 从盘重读全部设置到内存，再刷新界面。只在进入/回到界面时调。
     // Read every setting from disk into memory, then refresh the labels. Called only when the screen is (re)entered.
     private void refreshFromDisk() {
-        handheld = !"console".equals(read(configFile(), "operation_mode"));
-        if (overlaySwitch != null) overlaySwitch.setChecked(!"0".equals(read(configFile(), "debug_overlay")));
-        String preset = read(configFile(), "resolution");
+        handheld = !"console".equals(LaunchSettings.read(configFile(), "operation_mode"));
+        // 调试浮层默认关闭：只有配置里明确写了 1 才是开着（用户要求全局默认不显示）。
+        // The debug overlay defaults to off: only an explicit 1 in the config means on (the user asked for it to be
+        // off globally by default).
+        if (overlaySwitch != null) overlaySwitch.setChecked("1".equals(LaunchSettings.read(configFile(), "debug_overlay")));
+        String preset = LaunchSettings.read(configFile(), "resolution");
         resolutionIndex = 0;
         if (preset != null) for (int i = 0; i < RESOLUTION_PRESETS.length; i++) if (RESOLUTION_PRESETS[i].equals(preset)) resolutionIndex = i;
         applyLabels();
@@ -495,7 +463,7 @@ public final class LauncherActivity extends Activity {
         // 跟随档位时不写这个键：native 语义里"省略"就是不改动，保持原版 16:9 常数。
         // "Follow profile" writes no key: omitting it means "leave it alone" to native, keeping the original 16:9 constants.
         if (!RESOLUTION_PRESETS[resolutionIndex].isEmpty()) content.append("resolution=").append(RESOLUTION_PRESETS[resolutionIndex]).append('\n');
-        content.append(foreignLines());
+        content.append(LaunchSettings.foreign(configFile(), OWNED_KEYS));
         write(configFile(), content.toString());
         setStatus("", PARCHMENT);
         startActivity(new Intent(this, D2RActivity.class));

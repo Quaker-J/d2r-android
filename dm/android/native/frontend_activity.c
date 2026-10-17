@@ -37,6 +37,14 @@ typedef struct {
 } game_app;
 static game_app *application;
 static _Atomic int display_hz;
+// 运行时可切的调试浮层（游戏内菜单的「帧率显示」）：UI 线程写，调试线程每拍读。启动初值见 debug_overlay 的读取处。
+// Runtime-togglable debug overlay (the in-game menu's "frame rate display"): the UI thread writes it, the debug
+// thread reads it every tick. The startup value is read where DM_DEBUG_OVERLAY is.
+static _Atomic int debug_overlay_enabled;
+// 游戏内菜单是否开着（见 input_ready）：开着就吞掉手柄与按键事件，免得角色在菜单后面继续动。
+// Is the in-game menu open (see input_ready): while it is, pad and key events are swallowed so the character does
+// not keep moving behind the menu.
+static _Atomic int menu_open;
 int dm_android_display_hz(void) {return atomic_load(&display_hz);}
 static pthread_once_t frame_rate_once=PTHREAD_ONCE_INIT;
 static int32_t (*window_set_frame_rate)(ANativeWindow *,float,int8_t);
@@ -115,17 +123,26 @@ static void *progress_watch(void *argument) {
     battery_level=(*env)->GetMethodID(env,klass,"batteryLevelPercent","()I");
     battery_status=(*env)->GetMethodID(env,klass,"batteryStatusValue","()I");
     if((*env)->ExceptionCheck(env)){(*env)->ExceptionDescribe(env);(*env)->ExceptionClear(env);battery_current=battery_voltage=battery_level=battery_status=NULL;}
-    // 浮层开关由启动界面写进 launch-settings.conf，经 DM_DEBUG_OVERLAY 传到这里；只在启动时读一次，运行中不切换。
-    // The launcher writes the overlay switch into launch-settings.conf and it reaches us as DM_DEBUG_OVERLAY;
-    // read once at startup, never toggled at runtime. Absent or any value other than "0" keeps the overlay on.
+    // 浮层开关：启动值来自启动界面写进 launch-settings.conf 的 DM_DEBUG_OVERLAY；游戏内菜单可以随时开关
+    // （UI 线程写这个原子量，这里每拍读一次并按变化通知 Java 侧显隐）。
+    // **缺省关闭**（用户要求：调试浮层全局默认不显示），只有配置明确写 1 才打开；写 0 或没写都是关。
+    // The overlay switch starts from DM_DEBUG_OVERLAY, written into launch-settings.conf by the launcher; the
+    // in-game menu can toggle it at any time (the UI thread writes this atomic, this loop reads it every tick and
+    // tells the Java side to show/hide when it changes). **Off by default** (the user asked for the debug overlay to
+    // be off globally): only an explicit 1 turns it on; 0 or an absent key both mean off.
     const char *overlay_setting=getenv("DM_DEBUG_OVERLAY");
-    int overlay=!(overlay_setting&&!strcmp(overlay_setting,"0"));
+    atomic_store(&debug_overlay_enabled,overlay_setting&&!strcmp(overlay_setting,"1"));
     jmethodID overlay_method=(*env)->GetMethodID(env,klass,"setDebugOverlay","(Z)V");
     if((*env)->ExceptionCheck(env)){(*env)->ExceptionDescribe(env);(*env)->ExceptionClear(env);overlay_method=NULL;}
+    int overlay=atomic_load(&debug_overlay_enabled);
     if(overlay_method)(*env)->CallVoidMethod(env,a->clazz,overlay_method,(jboolean)(overlay!=0));
     else LOG("[android] debug overlay switch unavailable; showing the overlay");
+    int overlay_applied=overlay;
     uint64_t previous=0;unsigned unchanged=0;
     for(unsigned i=0;!atomic_load(&s->debug_stop);i++){usleep(500000);dm_android_debug_stats stats;dm_android_debug_get(&stats);dm_hud_info hud;dm_hud_get(&hud);
+        // 菜单改了浮层开关就跟着变：显示/隐藏交给 Java 侧，这里只决定还要不要产出文字。
+        // Follow the menu's overlay switch: the Java side owns show/hide, this loop only decides whether to produce text.
+        if((overlay=atomic_load(&debug_overlay_enabled))!=overlay_applied){overlay_applied=overlay;if(overlay_method)(*env)->CallVoidMethod(env,a->clazz,overlay_method,(jboolean)(overlay!=0));}
         pthread_mutex_lock(&text_request.lock);int keyboard=text_request.serial&&!text_request.done;pthread_mutex_unlock(&text_request.lock);
         // 浮层关掉时整块显示工作都跳过：不查电池、不读 /proc、不拼字符串、不碰 UI 线程。
         // 但下面的首帧看门狗必须照跑，它跟显示无关。
@@ -319,6 +336,19 @@ static void pad_publish(game_app *s) {
 }
 static void pad_clear(game_app *s) {s->pad_buttons=s->hat_buttons=s->trigger_buttons=s->move_keys=s->touch_buttons=0;s->tap_a=0;s->lx=s->ly=s->rx=s->ry=s->touch_lx=s->touch_ly=s->touch_rx=s->touch_ry=0;pad_publish(s);}
 static int32_t touch_axis(jint value) {return value>DM_STICK_MAX?DM_STICK_MAX:value< -DM_STICK_MAX?-DM_STICK_MAX:value;}
+// 游戏内菜单的两项运行时开关。注意命名方向：Java 侧的 setDebugOverlay 是 native → Java（通知显隐），
+// 这两个是 Java → native（菜单点了要改状态），所以名字不同。
+// Two runtime switches for the in-game menu. Mind the direction: on the Java side setDebugOverlay runs native ->
+// Java (show/hide notification), these two run Java -> native (a menu tap changes state), hence the different names.
+__attribute__((visibility("default"))) void Java_org_d2r_android_port_D2RActivity_setOverlayEnabled(JNIEnv *env,jclass klass,jboolean enabled) {
+    (void)env;(void)klass;atomic_store(&debug_overlay_enabled,enabled?1:0);
+}
+__attribute__((visibility("default"))) void Java_org_d2r_android_port_D2RActivity_setQualityPreset(JNIEnv *env,jclass klass,jint preset) {
+    (void)env;(void)klass;dm_3d_scale_set_preset((int)preset);
+}
+__attribute__((visibility("default"))) void Java_org_d2r_android_port_D2RActivity_setMenuOpen(JNIEnv *env,jclass klass,jboolean open) {
+    (void)env;(void)klass;atomic_store(&menu_open,open?1:0);
+}
 __attribute__((visibility("default"))) void Java_org_d2r_android_port_D2RActivity_onTouchPad(JNIEnv *env,jclass klass,jlong buttons,jint lx,jint ly,jint rx,jint ry) {
     (void)env;(void)klass;game_app *s=application;if(!s)return;
     // Java 窗口触控和 AInputQueue 都在 Activity 的主 Looper；统一走 HLE 的短按锁存。
@@ -341,6 +371,15 @@ static int input_ready(int fd,int events,void *data) {
         // Pad events arrive with either a JOYSTICK or a GAMEPAD source. Accepting only the former sends a
         // GAMEPAD-source D-pad into the touch branch below, where it is read as a finger position.
         int source=AInputEvent_getSource(event),is_motion=AInputEvent_getType(event)==AINPUT_EVENT_TYPE_MOTION;
+        // 游戏内菜单打开时挡住手柄与按键：菜单是独立窗口，手柄事件照样从 AInputQueue 进来，不挡的话角色会在菜单后面
+        // 继续动。两处**放行**：① 返回键 —— 它要走到菜单窗口去把菜单收起（菜单是 focusable 弹窗，自己会吃掉返回键）；
+        // ② 触摸 —— 菜单自己的触摸走它自己的窗口，屏幕手柄也要能点。
+        // While the in-game menu is open, pad and key events are swallowed here: the menu is a separate window and
+        // pad events still arrive on this AInputQueue, so without this the character keeps moving behind the menu.
+        // Two exceptions: ① the back key, which has to reach the menu window so it can be closed (a focusable popup
+        // consumes it itself); ② touches, since the menu's touches go to its own window and the on-screen controls
+        // must stay usable.
+        if(atomic_load(&menu_open)&&((AInputEvent_getType(event)==AINPUT_EVENT_TYPE_KEY&&AKeyEvent_getKeyCode(event)!=AKEYCODE_BACK)||(is_motion&&(source&(AINPUT_SOURCE_JOYSTICK|AINPUT_SOURCE_GAMEPAD))))){AInputQueue_finishEvent(s->input,event,1);continue;}
         if(is_motion&&(source&(AINPUT_SOURCE_JOYSTICK|AINPUT_SOURCE_GAMEPAD))){
             s->lx=stick_value(AMotionEvent_getAxisValue(event,AMOTION_EVENT_AXIS_X,0));s->ly=stick_value(-AMotionEvent_getAxisValue(event,AMOTION_EVENT_AXIS_Y,0));
             float x=AMotionEvent_getAxisValue(event,AMOTION_EVENT_AXIS_Z,0),y=AMotionEvent_getAxisValue(event,AMOTION_EVENT_AXIS_RZ,0);if(!x)x=AMotionEvent_getAxisValue(event,AMOTION_EVENT_AXIS_RX,0);if(!y)y=AMotionEvent_getAxisValue(event,AMOTION_EVENT_AXIS_RY,0);s->rx=stick_value(x);s->ry=stick_value(-y);
@@ -484,7 +523,10 @@ __attribute__((visibility("default"))) void ANativeActivity_onCreate(ANativeActi
     // NativeActivity dlopens its library without Java class-loader native-library registration; explicitly register text and touch callbacks.
     jclass klass=(*a->env)->GetObjectClass(a->env,a->clazz);JNINativeMethod methods[]={
         {"onTextResult","(JLjava/lang/String;Z)V",(void*)Java_org_d2r_android_port_D2RActivity_onTextResult},
-        {"onTouchPad","(JIIII)V",(void*)Java_org_d2r_android_port_D2RActivity_onTouchPad}
+        {"onTouchPad","(JIIII)V",(void*)Java_org_d2r_android_port_D2RActivity_onTouchPad},
+        {"setOverlayEnabled","(Z)V",(void*)Java_org_d2r_android_port_D2RActivity_setOverlayEnabled},
+        {"setQualityPreset","(I)V",(void*)Java_org_d2r_android_port_D2RActivity_setQualityPreset},
+        {"setMenuOpen","(Z)V",(void*)Java_org_d2r_android_port_D2RActivity_setMenuOpen}
     };
     if((*a->env)->RegisterNatives(a->env,klass,methods,sizeof methods/sizeof methods[0])!=JNI_OK){(*a->env)->ExceptionDescribe(a->env);(*a->env)->ExceptionClear(a->env);ANativeActivity_finish(a);return;}(*a->env)->DeleteLocalRef(a->env,klass);
     (void)saved;(void)bytes;game_app *s=calloc(1,sizeof *s);if(!s){ANativeActivity_finish(a);return;}s->activity=a;a->instance=s;application=s;pthread_mutex_init(&s->lock,NULL);pthread_cond_init(&s->ready,NULL);

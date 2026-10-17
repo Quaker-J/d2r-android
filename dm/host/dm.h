@@ -73,6 +73,7 @@ int dm_ingame_now(void);              // 是否在局内（diag.c） | Whether w
 void dm_3d_scale_feed(double iv_ms);   // 出图线程每帧报实际上屏间隔（−1 丢弃 / 0 无读数），驱动动态 3D 比例 | The present thread reports the actual present interval every frame (−1 discard / 0 no reading), driving the dynamic 3D scale
 float dm_3d_scale_cur(void);          // 当前生效的 3D 渲染比例（hle_oe.c scale3d_tick）     // 当前累计出图帧数（DM_TICKS 对齐观测） | The 3D render scale currently in effect (hle_oe.c scale3d_tick)     // current cumulative count of presented frames (for DM_TICKS alignment observation)
 void dm_3d_scale_resumed(void);       // 前端：刚回前台。回来头几秒的慢帧是恢复（表面重建、缓存变冷），不是 GPU 吃紧：停判 3 秒 | front end: just returned to the foreground. Slow frames in the first seconds back are recovery (surface rebuild, caches gone cold), not GPU pressure: stop judging for 3 seconds
+void dm_3d_scale_set_preset(int preset);   // 游戏内菜单的「画质」档位：-1 自动（动态控制器照旧）、0 高质量（配置值满值）、1 平衡 0.85、2 性能 0.70；固定档位期间动态控制器不插手，下一拍生效 | In-game menu "quality" preset: -1 automatic (the dynamic controller keeps working), 0 high (the configured full value), 1 balanced 0.85, 2 performance 0.70; while a preset is pinned the dynamic controller stays out of the way, effective on the next tick
 void dm_backtrace(uint64_t fp);
 void crash_watch_progress(uint32_t tick, const char *stage);
 void crash_watch_frame(void);

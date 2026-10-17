@@ -198,6 +198,18 @@ static int scale3d_ctl_step(scale3d_ctl *c, double iv_ms, uint64_t now) {   // �
     }
     return c->level;
 }
+// 游戏内菜单固定档位：-1 = 自动（动态控制器照旧），0 高质量 / 1 平衡 / 2 性能。定档期间动态控制器不插手，
+// 否则它会把玩家选的档又按帧率降下去；切回自动它立刻恢复工作。
+// Menu-pinned level: -1 = automatic (the dynamic controller keeps working), 0 high / 1 balanced / 2 performance.
+// While pinned the dynamic controller stays out of the way, otherwise it would lower the level the player just
+// picked; back on automatic it resumes at once.
+#define SCALE3D_BALANCED 0.85f
+static _Atomic int g_scale3d_forced = -1;
+void dm_3d_scale_set_preset(int preset) {
+    if (preset < -1 || preset > 2) return;
+    atomic_store(&g_scale3d_forced, preset);
+    LOG("3D 比例档位切到「%s」，下一拍生效", preset < 0 ? "自动" : preset == 0 ? "高质量" : preset == 1 ? "平衡" : "性能");
+}
 static _Atomic int g_scale3d_level;
 static _Atomic int g_scale3d_resumed;
 void dm_3d_scale_resumed(void) { atomic_store(&g_scale3d_resumed, 1); }   // 前端：刚回前台。回来头几秒的慢帧是恢复（表面重建、缓存变冷），不是 GPU 吃紧：停判 3 秒 | front end: just returned to foreground. Slow frames in the first few seconds back are recovery (surface rebuild, caches gone cold), not GPU pressure: suspend judging for 3 seconds
@@ -206,6 +218,7 @@ void dm_3d_scale_feed(double iv_ms) {   // 出图线程每帧调（diag.c dm_per
     if (on < 0) { const char *e = getenv("DM_3D_SCALE_DYN"), *j = getenv("DM_3D_SCALE_DYN_INJECT"); on = !(e && !strcmp(e, "0")) && !getenv("DM_THERMAL_NOFALLBACK");
         if (j) { inj0 = atol(j); inj1 = strchr(j, '-') ? atol(strchr(j, '-') + 1) : inj0; } }
     if (!on) return;
+    if (atomic_load(&g_scale3d_forced) >= 0) return;   // 菜单定档期间动态控制器不插手 | while the menu has a level pinned, the dynamic controller stays out
     if (inj0 >= 0) { long f = (long)dm_nvn_frame_count(); iv_ms = f >= inj0 && f <= inj1 ? 25.0 : 16.7; }
     uint64_t now = now_ns();
     if (atomic_exchange(&g_scale3d_resumed, 0)) scale3d_ctl_hold(&c, now, 3 * S3_SEC);
@@ -228,7 +241,8 @@ static void scale3d_tick(void) {
         for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) main = &g_mod[i];
     }
     int lv = atomic_load(&g_scale3d_level);   // 动态级：0 = 配置值，1 = 0.72，2 = 0.70（都不高于配置值） | dynamic level: 0 = configured value, 1 = 0.72, 2 = 0.70 (none higher than the configured value)
-    float dyn = lv == 0 ? want_cfg : lv == 1 ? SCALE3D_MID : SCALE3D_MIN; if (dyn > want_cfg) dyn = want_cfg;
+    int forced = atomic_load(&g_scale3d_forced);   // 菜单定档时以定档值为准，动态级不参与 | a menu-pinned level wins over the dynamic one
+    float dyn = forced == 0 ? want_cfg : forced == 1 ? SCALE3D_BALANCED : forced == 2 ? SCALE3D_MIN : lv == 0 ? want_cfg : lv == 1 ? SCALE3D_MID : SCALE3D_MIN; if (dyn > want_cfg) dyn = want_cfg;
     float want = dm_nvn_ruler_truth() ? 1.0f : dyn;
     if (want == cur || !main || dm_nvn_frame_count() < 30) return;
     uintptr_t renderer = *(uintptr_t *)(main->base + 0x31e0848); if (!renderer) return;
