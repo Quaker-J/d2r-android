@@ -8,6 +8,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.hardware.input.InputManager;
 import android.os.BatteryManager;
 import android.os.Bundle;
 import android.text.Editable;
@@ -16,6 +17,7 @@ import android.text.TextWatcher;
 import android.text.InputType;
 import android.view.WindowManager;
 import android.view.Display;
+import android.view.InputDevice;
 import android.util.Log;
 import android.widget.EditText;
 import android.widget.TextView;
@@ -37,6 +39,7 @@ public final class D2RActivity extends NativeActivity {
     private volatile int batteryVoltageMv = -1;
     private volatile int batteryLevel = -1;
     private volatile int batteryStatus = -1;
+    private boolean physicalController;
     private static native void onTextResult(long request, String text, boolean accepted);
     private static native void onTouchPad(long buttons, int leftX, int leftY, int rightX, int rightY);
 
@@ -160,11 +163,48 @@ public final class D2RActivity extends NativeActivity {
             }
         };
         registerReceiver(batteryReceiver, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+        // 设备监听只在变化时回调，所以要先用一次扫描拿到"启动时就已接入"的手柄。
+        // The listener only fires on change, so scan once to catch a controller already connected at launch.
+        InputManager inputManager = (InputManager) getSystemService(Context.INPUT_SERVICE);
+        if (inputManager != null) inputManager.registerInputDeviceListener(inputDeviceListener, null);
+        refreshPhysicalController();
         touchControls = new TouchControls(this, (buttons, x, y) -> onTouchPad(buttons, x, y, 0, 0));
     }
 
     private void updateTouchVisibility() {
-        if (touchControls != null) touchControls.setVisible(activityResumed && hasWindowFocus() && textDialog == null);
+        if (touchControls != null)
+            touchControls.setVisible(activityResumed && hasWindowFocus() && textDialog == null && !physicalController);
+    }
+
+    // 手柄是否接入。只认 SOURCE_GAMEPAD / SOURCE_JOYSTICK，避免把触屏、遥控器也算成手柄。
+    // Is a gamepad connected: only SOURCE_GAMEPAD / SOURCE_JOYSTICK count, so touchscreens and remotes do not.
+    private boolean anyGamepad() {
+        InputManager manager = (InputManager) getSystemService(Context.INPUT_SERVICE);
+        if (manager == null) return false;
+        for (int id : manager.getInputDeviceIds()) {
+            InputDevice device = manager.getInputDevice(id);
+            if (device == null) continue;
+            int sources = device.getSources();
+            if ((sources & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD ||
+                (sources & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK) return true;
+        }
+        return false;
+    }
+
+    // 用设备级监听而不是事件分发：NativeActivity 把 AInputQueue 直接挂到主 Looper 消费了手柄事件，
+    // 窗口的事件分发看不到它们；设备增删回调与谁消费事件无关，所以这条路可靠。
+    // A device-level listener rather than event dispatch: NativeActivity attaches the AInputQueue to the main
+    // Looper and consumes pad events, so window dispatch never sees them, while add/remove callbacks do not care
+    // who consumes the events.
+    private final InputManager.InputDeviceListener inputDeviceListener = new InputManager.InputDeviceListener() {
+        @Override public void onInputDeviceAdded(int id) { refreshPhysicalController(); }
+        @Override public void onInputDeviceRemoved(int id) { refreshPhysicalController(); }
+        @Override public void onInputDeviceChanged(int id) { refreshPhysicalController(); }
+    };
+
+    private void refreshPhysicalController() {
+        physicalController = anyGamepad();
+        updateTouchVisibility();
     }
 
     @Override protected void onResume() {
@@ -273,6 +313,8 @@ public final class D2RActivity extends NativeActivity {
 
     @Override protected void onDestroy() {
         if (batteryReceiver != null) { unregisterReceiver(batteryReceiver); batteryReceiver = null; }
+        InputManager inputManager = (InputManager) getSystemService(Context.INPUT_SERVICE);
+        if (inputManager != null) inputManager.unregisterInputDeviceListener(inputDeviceListener);
         if (touchControls != null) touchControls.destroy();
         if (debugPopup != null) debugPopup.dismiss();
         if (textDialog != null) finishText(textRequest, "", false);

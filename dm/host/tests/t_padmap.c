@@ -4,6 +4,7 @@
 // right B, left X, top Y; everything else is laid out as Xbox.
 #include <stdio.h>
 #include "../dm_padmap.h"
+#include "../dm_input.h"
 static int checks, fails;
 #define CHECK(c, ...) do { checks++; if (c) printf("  ✓ "); else { fails++; printf("  ✗ "); } printf(__VA_ARGS__); printf("\n"); } while (0)
 int main(void) {
@@ -20,6 +21,20 @@ int main(void) {
     CHECK(dm_padmap_face(DM_PADKIND_XBOX, 1, 0, 0, 0) == DM_BTN_A, "Xbox：下 = A"); CHECK(dm_padmap_face(DM_PADKIND_XBOX, 0, 1, 0, 0) == DM_BTN_B, "Xbox：右 = B");
     CHECK(dm_padmap_face(DM_PADKIND_XBOX, 0, 0, 1, 0) == DM_BTN_X, "Xbox：左 = X"); CHECK(dm_padmap_face(DM_PADKIND_XBOX, 0, 0, 0, 1) == DM_BTN_Y, "Xbox：上 = Y");
     CHECK(dm_padmap_face(DM_PADKIND_XBOX, 1, 1, 0, 0) == (DM_BTN_A | DM_BTN_B), "两颗同时按：各算各的"); CHECK(dm_padmap_face(DM_PADKIND_NINTENDO, 0, 0, 0, 0) == 0, "都没按 = 0");
+    // 十字键的 HAT 轴映射（dm_input.h）：先按安卓惯例 —— HAT_Y 负为上、正为下；阈值 ±0.5 容忍模拟量；两轴同过阈值给斜向两位。
+    // 上下方向若在真机上相反，看 [android-pad] 那行日志即可确认，改这里一处。
+    // HAT-axis mapping for the D-pad (dm_input.h), starting from the Android convention: HAT_Y negative is up and
+    // positive is down; ±0.5 tolerates analogue hats; both axes over the threshold give two diagonal bits. If up
+    // and down turn out swapped on a real pad, the [android-pad] log line shows it and only this needs changing.
+    CHECK(dm_pad_hat_buttons(0, 0) == 0, "HAT 居中 = 无方向");
+    CHECK(dm_pad_hat_buttons(-1, 0) == DM_BTN_LEFT, "HAT 左 = Left");
+    CHECK(dm_pad_hat_buttons(1, 0) == DM_BTN_RIGHT, "HAT 右 = Right");
+    CHECK(dm_pad_hat_buttons(0, -1) == DM_BTN_UP, "HAT 上（Y 负）= Up");
+    CHECK(dm_pad_hat_buttons(0, 1) == DM_BTN_DOWN, "HAT 下（Y 正）= Down");
+    CHECK(dm_pad_hat_buttons(-1, -1) == (DM_BTN_LEFT | DM_BTN_UP), "HAT 左上 = Left+Up");
+    CHECK(dm_pad_hat_buttons(1, 1) == (DM_BTN_RIGHT | DM_BTN_DOWN), "HAT 右下 = Right+Down");
+    CHECK(dm_pad_hat_buttons(0.4f, -0.4f) == 0, "低于阈值不触发（容忍模拟量漂移）");
+    CHECK(dm_pad_hat_buttons(-0.5f, 0) == DM_BTN_LEFT, "恰好 -0.5 算触发（边界含）");
     printf("== %d 项，失败 %d ==\n", checks, fails);
     return fails != 0;
 }

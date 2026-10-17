@@ -365,6 +365,8 @@ static const struct { const char *k, *zh, *en; } k_dm_i18n[] = {
     { "dmAndroidLaunchImportSummary", "%d 个资源、%d 个着色器", "%d assets, %d shaders" },
     { "dmAndroidLaunchImportFailed", "导入失败：%s", "Import failed: %s" },
     { "dmAndroidLaunchCancel", "正在取消…", "Cancelling…" },
+    { "dmAndroidLaunchResolution", "分辨率", "Resolution" },
+    { "dmAndroidLaunchFollowProfile", "跟随档位", "Follow profile" },
     { "dmAndroidLaunchNeedsImport", "还没有数据包，请先导入再启动游戏", "No package yet; import one before starting the game" },
     { "dmAndroidLaunchPending", "数据包由电脑端生成（见 docs/ANDROID_PACKAGE.zh-CN.md），导入后即可启动", "The package is produced on a PC (see docs/ANDROID_PACKAGE.zh-CN.md); import it to start" },
 };

@@ -29,8 +29,8 @@
 typedef struct {
     ANativeActivity *activity; ANativeWindow *window; AInputQueue *input;
     pthread_mutex_t lock; pthread_cond_t ready; pthread_t worker;
-    int stop; _Atomic int started;
-    uint64_t pad_buttons,move_keys;int tap_a;int32_t lx,ly,rx,ry;
+    int stop; _Atomic int started; _Atomic int activity_resumed;
+    uint64_t pad_buttons,hat_buttons,move_keys;int tap_a;int32_t lx,ly,rx,ry;
     uint64_t touch_buttons;int32_t touch_lx,touch_ly,touch_rx,touch_ry;
     pthread_t debug_thread;int debug_started;_Atomic int debug_stop;
     float requested_frame_rate;int frame_rate_attempted;
@@ -157,6 +157,15 @@ static void *progress_watch(void *argument) {
             jstring value=java_text(env,text);(*env)->CallVoidMethod(env,a->clazz,method,value);(*env)->DeleteLocalRef(env,value);
             if((*env)->ExceptionCheck(env)){(*env)->ExceptionDescribe(env);(*env)->ExceptionClear(env);break;}
         }
+        // 生命周期读数每 10 秒一行：3D 比例决定"抬分辨率到底有没有让 3D 变清"（掉帧时控制器会把内部比例压回去），
+        // 客体时钟决定"后台那一整段有没有被算进游戏时间"（不该算）。两个都是判断切后台/回前台是否正常的直接读数，
+        // 而上面那条进度行只在前 48 秒打（它兼首帧看门狗），覆盖不到进局与切后台之后。
+        // A lifecycle reading every 10 seconds: the 3D scale decides whether raising the resolution really sharpened
+        // the 3D world (the controller scales the internal ratio back down on dropped frames), the guest clock
+        // whether the background period was counted into game time (it must not be). Both are the direct readings
+        // for judging a background/return cycle, and the progress line above only covers the first 48 seconds (it
+        // doubles as the first-frame watchdog), so it never reaches the run or anything after a background switch.
+        if(i%20==0&&i>=96){uint64_t frame=dm_nvn_frame_count();LOG("[android] 运行状态 frame=%llu 输入样本=%llu 3D=%.2f 客体时钟=%.1f s",(unsigned long long)frame,(unsigned long long)dm_input_samples(),dm_3d_scale_cur(),guest_ns()/1e9);}
         if(i<96&&i%4==0){uint64_t frame=dm_nvn_frame_count();LOG("[android] game progress frame=%llu input_samples=%llu",(unsigned long long)frame,(unsigned long long)dm_input_samples());
             if(frame&&frame==previous&&!keyboard){if(++unchanged==4)crash_dump_now("Android first-frame progress stalled");}else unchanged=0;previous=frame;}
     }
@@ -225,7 +234,11 @@ static void *boot(void *argument) {
     // Apply fully validated application settings before the guest first caches its operation mode and input log.
     dm_android_launch_settings launch;char launch_error[512];
     if(!dm_android_launch_settings_apply(path,&launch,launch_error,sizeof launch_error))die("[android] launch settings: %s",launch_error);
-    LOG("[android] launch configuration present=%d operation_mode=%d input_receipts=%d",launch.present,launch.operation_mode,launch.input_receipts);
+    LOG("[android] launch configuration present=%d operation_mode=%d input_receipts=%d 分辨率=%dx%d",launch.present,launch.operation_mode,launch.input_receipts,launch.resolution_width,launch.resolution_height);
+    // 设置生效后立刻记一次环境，确认 DM_GAME_RES 真的传下去了（否则只会在游戏那边看到"未设"）。
+    // Immediately record the environment after the settings apply, to confirm DM_GAME_RES really got through;
+    // otherwise the only symptom is "unset" on the game side.
+    LOG("[android] 环境核对 DM_OPMODE=%s DM_GAME_RES=%s DM_DEBUG_OVERLAY=%s",getenv("DM_OPMODE")?getenv("DM_OPMODE"):"(未设)",getenv("DM_GAME_RES")?getenv("DM_GAME_RES"):"(未设)",getenv("DM_DEBUG_OVERLAY")?getenv("DM_DEBUG_OVERLAY"):"(未设)");
     setenv("DM_TACT_PREFETCH","0",1);setenv("DM_BOOTPROF","1",1);setenv("DM_DBG","1",1);
     setenv("DM_UIMSG","1",1);setenv("DM_MOVIE","1",1);
     __android_log_print(ANDROID_LOG_INFO,"D2RAndroid","Starting real game host; log: %s",log);atomic_store(&s->started,1);
@@ -233,7 +246,28 @@ static void *boot(void *argument) {
 }
 void front_run(void (*guest)(void)) {void mtl_init(void);mtl_init();game_app *s=application;if(!pthread_create(&s->debug_thread,NULL,progress_watch,s))s->debug_started=1;guest();}
 void *front_metal_layer(void) {if(!application)return NULL;pthread_mutex_lock(&application->lock);ANativeWindow *w=application->window;pthread_mutex_unlock(&application->lock);return w;}
-uint64_t front_game_res(int docked) {return docked?((uint64_t)900<<32)|1600:((uint64_t)720<<32)|1280;}
+// 出图分辨率。与 Mac（front_mac.m）和 iOS（front_ios.m）同一语义：DM_GAME_RES=宽x高 覆盖主机档，
+// 掌机档按 720/900 = 0.8 同比缩放；没有该变量时保持原版 16:9 常数（1600x900 / 1280x720），行为不变。
+// 注意必须在启动时抬高：窗口贴图按启动时的参数位一次建好，之后游戏只接受不超过它的新值（dm_uiscreen.c），
+// 也就是运行时只能缩不能放。另外抬分辨率不等于 3D 渲染跟着变清 —— DM_3D_SCALE_DYN 掉帧时会把 3D 内部比例压回去。
+// Output resolution, with the same semantics as Mac (front_mac.m) and iOS (front_ios.m): DM_GAME_RES=<w>x<h>
+// overrides the docked profile and the handheld profile scales it by 720/900 = 0.8. Without the variable the
+// original 16:9 constants stay (1600x900 / 1280x720), so nothing changes. It must be raised at startup: the window
+// texture is built once from the startup parameters and the game only accepts new values up to that size
+// (dm_uiscreen.c), so at runtime it can only shrink. Raising it also does not automatically sharpen the 3D world —
+// DM_3D_SCALE_DYN scales the internal 3D ratio back down when frames drop.
+uint64_t front_game_res(int docked) {
+    unsigned w=1600,h=900;const char *e=getenv("DM_GAME_RES");
+    if(e&&*e&&sscanf(e,"%ux%u",&w,&h)!=2){LOG("[android] DM_GAME_RES 解析失败，用默认 1600x900：%s",e);w=1600;h=900;}
+    static int reported;
+    // 前三次都记：分辨率必须在启动时定下来（游戏按启动时的参数位建窗口贴图），而如果第一次被问发生在启动
+    // 设置生效之前，只看第一行会看不出这件事 —— 出问题时需要能直接看到"当时读到的是什么"。
+    // Log the first three calls: the resolution must be decided at startup (the game builds its window texture from
+    // the startup parameter slot), and if the first ask happens before the launch settings take effect, only the
+    // first line would hide that — when it goes wrong this shows what was actually read at that moment.
+    if(reported<3){reported++;LOG("[android] 出图档位=%s DM_GAME_RES=%s → 主机档 %ux%u / 掌机档 %ux%u (第%d次)",docked?"主机":"掌机",e&&*e?e:"(未设)",w,h,(w*4/5+3)/4*4,h*4/5,reported);}
+    return docked?((uint64_t)h<<32)|w:((uint64_t)(h*4/5)<<32)|(((w*4/5)+3)/4*4);
+}
 static int text_input_request(const char *title,const char *sub,const char *guide,const char *initial,int max,char *out,int cap) {
     if(!application||!out||cap<=0)return -1;ANativeActivity *a=application->activity;JNIEnv *env=NULL;int attached=0;
     if((*a->vm)->GetEnv(a->vm,(void**)&env,JNI_VERSION_1_6)!=JNI_OK){if((*a->vm)->AttachCurrentThread(a->vm,&env,NULL)!=JNI_OK)return -1;attached=1;}
@@ -275,12 +309,15 @@ static void pad_publish(game_app *s) {
     int32_t x=s->lx,y=s->ly;
     if(s->move_keys){x=((!!(s->move_keys&DM_BTN_RIGHT))-(!!(s->move_keys&DM_BTN_LEFT)))*DM_STICK_MAX;y=((!!(s->move_keys&DM_BTN_UP))-(!!(s->move_keys&DM_BTN_DOWN)))*DM_STICK_MAX;}
     // 分开合并实体与屏幕手柄；抬起一只手不会清掉另一输入来源仍按住的键。
+    // 十字键来自 HAT 轴时用它自己的位掩码，否则一次 HAT 归零会把同时按住的 DPAD 键码也清掉。
     // Merge physical and on-screen pads separately; releasing one source never clears a key held by another.
+    // D-pad bits that arrive as HAT axes keep their own mask, otherwise one HAT zero would also clear a
+    // simultaneously held DPAD keycode.
     if(!x&&!y){x=s->touch_lx;y=s->touch_ly;}
     int32_t rx=s->rx,ry=s->ry;if(!rx&&!ry){rx=s->touch_rx;ry=s->touch_ry;}
-    dm_pad_set(s->pad_buttons|s->touch_buttons|(s->tap_a?DM_BTN_A:0),x,y,rx,ry);
+    dm_pad_set(s->pad_buttons|s->hat_buttons|s->touch_buttons|(s->tap_a?DM_BTN_A:0),x,y,rx,ry);
 }
-static void pad_clear(game_app *s) {s->pad_buttons=s->move_keys=s->touch_buttons=0;s->tap_a=0;s->lx=s->ly=s->rx=s->ry=s->touch_lx=s->touch_ly=s->touch_rx=s->touch_ry=0;pad_publish(s);}
+static void pad_clear(game_app *s) {s->pad_buttons=s->hat_buttons=s->move_keys=s->touch_buttons=0;s->tap_a=0;s->lx=s->ly=s->rx=s->ry=s->touch_lx=s->touch_ly=s->touch_rx=s->touch_ry=0;pad_publish(s);}
 static int32_t touch_axis(jint value) {return value>DM_STICK_MAX?DM_STICK_MAX:value< -DM_STICK_MAX?-DM_STICK_MAX:value;}
 __attribute__((visibility("default"))) void Java_org_d2r_android_port_D2RActivity_onTouchPad(JNIEnv *env,jclass klass,jlong buttons,jint lx,jint ly,jint rx,jint ry) {
     (void)env;(void)klass;game_app *s=application;if(!s)return;
@@ -299,10 +336,28 @@ static uint64_t pad_key(int key) {
 static int input_ready(int fd,int events,void *data) {
     (void)fd;(void)events;game_app *s=data;AInputEvent *event;
     while(AInputQueue_getEvent(s->input,&event)>=0){if(AInputQueue_preDispatchEvent(s->input,event))continue;int handled=0;
-        if(AInputEvent_getType(event)==AINPUT_EVENT_TYPE_MOTION&&(AInputEvent_getSource(event)&AINPUT_SOURCE_JOYSTICK)==AINPUT_SOURCE_JOYSTICK){
+        // 手柄事件可能带 JOYSTICK 源，也可能只带 GAMEPAD 源；只认前者的话，纯 GAMEPAD 源的方向键会掉进
+        // 下面的触摸分支，被当成一根手指的坐标。
+        // Pad events arrive with either a JOYSTICK or a GAMEPAD source. Accepting only the former sends a
+        // GAMEPAD-source D-pad into the touch branch below, where it is read as a finger position.
+        int source=AInputEvent_getSource(event),is_motion=AInputEvent_getType(event)==AINPUT_EVENT_TYPE_MOTION;
+        if(is_motion&&(source&(AINPUT_SOURCE_JOYSTICK|AINPUT_SOURCE_GAMEPAD))){
             s->lx=stick_value(AMotionEvent_getAxisValue(event,AMOTION_EVENT_AXIS_X,0));s->ly=stick_value(-AMotionEvent_getAxisValue(event,AMOTION_EVENT_AXIS_Y,0));
-            float x=AMotionEvent_getAxisValue(event,AMOTION_EVENT_AXIS_Z,0),y=AMotionEvent_getAxisValue(event,AMOTION_EVENT_AXIS_RZ,0);if(!x)x=AMotionEvent_getAxisValue(event,AMOTION_EVENT_AXIS_RX,0);if(!y)y=AMotionEvent_getAxisValue(event,AMOTION_EVENT_AXIS_RY,0);s->rx=stick_value(x);s->ry=stick_value(-y);pad_publish(s);handled=1;
-        }else if(AInputEvent_getType(event)==AINPUT_EVENT_TYPE_MOTION){int raw_action=AMotionEvent_getAction(event),action=raw_action&AMOTION_EVENT_ACTION_MASK;unsigned lifted=(raw_action&AMOTION_EVENT_ACTION_POINTER_INDEX_MASK)>>AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT;dm_touch touches[16];int count=0;
+            float x=AMotionEvent_getAxisValue(event,AMOTION_EVENT_AXIS_Z,0),y=AMotionEvent_getAxisValue(event,AMOTION_EVENT_AXIS_RZ,0);if(!x)x=AMotionEvent_getAxisValue(event,AMOTION_EVENT_AXIS_RX,0);if(!y)y=AMotionEvent_getAxisValue(event,AMOTION_EVENT_AXIS_RY,0);s->rx=stick_value(x);s->ry=stick_value(-y);
+            // 十字键：不少手柄（含 Xbox）把它报成 HAT 轴而不是 DPAD 键码，之前整块被丢掉，方向键就没反应。
+            // HAT_Y 负为上、正为下，这是安卓的约定。阈值 ±0.5 容忍模拟量。
+            // D-pad: many pads (Xbox included) report it as HAT axes rather than DPAD keycodes, and it used to be
+            // dropped entirely, which is why the D-pad did nothing. HAT_Y is negative up and positive down by the
+            // Android convention; the ±0.5 threshold tolerates analogue hats.
+            float hx=AMotionEvent_getAxisValue(event,AMOTION_EVENT_AXIS_HAT_X,0),hy=AMotionEvent_getAxisValue(event,AMOTION_EVENT_AXIS_HAT_Y,0);
+            uint64_t hat=dm_pad_hat_buttons(hx,hy);
+            // 只在变化时记一行：方向键本来就是低频事件，这样出问题时能直接看到"哪一次按下的方向被认成了什么"。
+            // Log only on change: the D-pad is a low-frequency event, and when it misbehaves this shows exactly
+            // which press was recognised as which direction.
+            if(hat!=s->hat_buttons)LOG("[android-pad] hat x=%.2f y=%.2f → buttons=%#llx",hx,hy,(unsigned long long)hat);
+            s->hat_buttons=hat;
+            pad_publish(s);handled=1;
+        }else if(is_motion){int raw_action=AMotionEvent_getAction(event),action=raw_action&AMOTION_EVENT_ACTION_MASK;unsigned lifted=(raw_action&AMOTION_EVENT_ACTION_POINTER_INDEX_MASK)>>AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT;dm_touch touches[16];int count=0;
             pthread_mutex_lock(&s->lock);ANativeWindow *window=s->window;int w=window?ANativeWindow_getWidth(window):1,h=window?ANativeWindow_getHeight(window):1;pthread_mutex_unlock(&s->lock);
             float gw=w,gh=w*9.f/16.f;if(gh>h){gh=h;gw=h*16.f/9.f;}float left=(w-gw)/2,top=(h-gh)/2;
             if(action!=AMOTION_EVENT_ACTION_UP&&action!=AMOTION_EVENT_ACTION_CANCEL)for(unsigned i=0;i<AMotionEvent_getPointerCount(event)&&count<16;i++){if(action==AMOTION_EVENT_ACTION_POINTER_UP&&i==lifted)continue;float x=(AMotionEvent_getX(event,i)-left)/gw,y=(AMotionEvent_getY(event,i)-top)/gh;if(x>=0&&x<1&&y>=0&&y<1)touches[count++]=(dm_touch){AMotionEvent_getPointerId(event,i)&15,x,y};}
@@ -315,13 +370,95 @@ static int input_ready(int fd,int events,void *data) {
         AInputQueue_finishEvent(s->input,event,handled);
     }return 1;
 }
-static void window_created(ANativeActivity *a,ANativeWindow *w) {game_app *s=a->instance;pthread_mutex_lock(&s->lock);ANativeWindow_acquire(w);s->window=w;s->frame_rate_attempted=0;pthread_cond_signal(&s->ready);pthread_mutex_unlock(&s->lock);}
-static void window_destroyed(ANativeActivity *a,ANativeWindow *w) {game_app *s=a->instance;if(atomic_load(&s->started))dm_host_shutdown("Android game window destroyed");pthread_mutex_lock(&s->lock);if(s->window==w){s->window=NULL;ANativeWindow_release(w);}pthread_mutex_unlock(&s->lock);}
+// 退出前请游戏存盘并等它提交，最多 3 秒。
+// 游戏自己的定时存盘是 5 分钟一次，且没有"切后台就存"这条路：不请它，从上次提交到现在的进度就没了。
+// Mac（front_mac.m 的 app_quit）与 iOS（front_ios.m 进后台）都做了这件事，安卓原先漏了。
+// 没等到提交要如实记红，不能让人以为存上了。
+// Ask the game to save and wait up to 3 s for the commit before shutting down. The game's own timed autosave is
+// every 5 minutes and it has no save-on-background path, so without asking, everything since the last commit is
+// lost. Mac (app_quit in front_mac.m) and iOS (going to background) already do this; Android did not. Failing to
+// get a commit is logged loudly rather than left to look like a successful save.
+static void settle_save(void) {
+    int dm_ingame_now(void);int dm_uiscreen_ingame(void);int dm_request_save(void);int dm_unpause_for_exit(void);uint64_t dm_fs_commit_count(void);uint64_t now_ns(void);
+    if(!dm_ingame_now()&&!dm_uiscreen_ingame()){LOG("[android] 退出：不在局内，没有待存的进度");return;}
+    // 暂停菜单/面板开着时游戏不跑拍，拨的那次存盘等不到，所以先放开暂停（不写回）。
+    // With a pause menu or panel open the game does not tick, so the requested save never happens; release the
+    // pause first (not written back).
+    uint64_t c0=dm_fs_commit_count(),t0=now_ns(),last=c0,last_t=0;int asked=0,paused=0;
+    for(;;){
+        paused|=dm_unpause_for_exit();if(!asked)asked=dm_request_save();
+        usleep(20000);uint64_t c=dm_fs_commit_count(),t=now_ns();
+        if(c!=last){last=c;last_t=t;}
+        if((asked&&last_t&&t-last_t>=200000000ull)||t-t0>=3000000000ull)break;
+    }
+    if(last!=c0&&asked)LOG("[android] 退出前等游戏存盘 %.0f ms，期间存档提交 %llu 次%s",(now_ns()-t0)/1e6,(unsigned long long)(last-c0),paused?"（原先停在暂停菜单/面板，已放开）":"");
+    else LOG("[android] 【红】未存盘退出：3 秒内没等到存档提交（%s%s）",asked?"已请游戏存盘":"不处于可请存盘的状态",paused?"，原先暂停着、已放开":"");
+}
+static void window_created(ANativeActivity *a,ANativeWindow *w) {game_app *s=a->instance;pthread_mutex_lock(&s->lock);ANativeWindow_acquire(w);s->window=w;s->frame_rate_attempted=0;pthread_cond_signal(&s->ready);pthread_mutex_unlock(&s->lock);
+    // 游戏已在跑时这块窗口是"从后台回来"的新窗口：挂起期间重建表面与交换链（此刻游戏线程被挡在 NVN 入口外，不会争）。
+    // When the game is already running this is the new window from returning to the foreground: rebuild the surface
+    // and swapchain while graphics are suspended, when the game thread is parked outside NVN and cannot contend.
+    if(atomic_load(&s->started)){
+        void mtl_screen_attach(struct ANativeWindow *);mtl_screen_attach(w);
+        // mtl_screen_attach 自己先挂起（重建交换链时游戏线程不能在外面读它），但**不**放开：这个回调与
+        // onResume 的先后由系统决定，真机实测是"图形恢复（onResume）先、窗口后"，所以迟到时必须在这里按
+        // 当前是否在前台把状态摆回去；否则那次挂起没人解除，游戏会永远卡在出图上。
+        // mtl_screen_attach suspends first (the game thread must not be reading the swapchain while it is
+        // rebuilt) but does not release it: the order of this callback against onResume is the system's choice —
+        // measured on device, 图形恢复 (onResume) comes first and the window after — so a late window has to put
+        // the state back here, based on whether the app is in the foreground; otherwise nothing would release
+        // that suspension and the game would stay stuck on its last frame.
+        if(atomic_load(&s->activity_resumed))dm_gfx_suspend(0);}}
+static void window_destroyed(ANativeActivity *a,ANativeWindow *w) {game_app *s=a->instance;
+    // 窗口销毁不再等于退出进程：安卓在 Activity 停止时必然销毁窗口，保留进程才能在回到前台时接着玩。
+    // 退出前照 Mac/iOS 请游戏存盘（否则丢掉上一次提交之后的进度），再释放表面与交换链；真正退出走 destroyed()。
+    // **顺序不能换**：请存盘在前、冻结客体时钟与挂起图形在后。反过来游戏线程会被挡在 NVN 入口外，那次自动存盘
+    // 永远提交不了，切后台就等于没存 —— 真机上就是这么失败的。
+    // 客体时钟一并冻结（iOS 同一处理）：游戏线程挡在提交处、墙钟却照走，不冻结的话回来时游戏内时间会一下跳过
+    // 整段后台时长（补拍 / 动画 / 冷却全跟着跳）。真机上曾看到"整帧 83839.6 ms"，就是那一段。
+    // **The order matters**: the save request comes first; freezing the guest clock and suspending graphics come
+    // after. The other way round parks the game thread outside NVN, that autosave can never commit, and going to
+    // the background saves nothing — which is exactly how it failed on device.
+    // The guest clock is frozen as well (same as iOS): the game thread is blocked at submission while the wall clock
+    // keeps running, so without the freeze in-game time jumps over the whole background duration on return
+    // (catch-up ticks / animations / cooldowns all jump with it). An "83,839.6 ms whole frame" was seen on device.
+    // A destroyed window no longer means the process ends: Android always destroys it when the activity stops, and
+    // keeping the process is what lets play resume. Save first as Mac and iOS do (otherwise everything since the
+    // last commit is lost), then release the surface and swapchain. A real exit goes through destroyed().
+    if(atomic_load(&s->started)){settle_save();guest_clock_freeze_for(1,1);void mtl_screen_detach(void);mtl_screen_detach();LOG("[android] 窗口销毁：保留进程等待回到前台");}
+    pthread_mutex_lock(&s->lock);if(s->window==w){s->window=NULL;ANativeWindow_release(w);}pthread_mutex_unlock(&s->lock);}
 static void input_created(ANativeActivity *a,AInputQueue *q) {game_app *s=a->instance;s->input=q;AInputQueue_attachLooper(q,ALooper_forThread(),0,input_ready,s);}
 static void input_destroyed(ANativeActivity *a,AInputQueue *q) {game_app *s=a->instance;AInputQueue_detachLooper(q);s->input=NULL;dm_touch_set(NULL,0);pad_clear(s);}
-static void resumed(ANativeActivity *a) {game_app *s=a->instance;dm_android_performance_resume();if(atomic_load(&s->started)){dm_gfx_suspend(0);dm_audio_suspend(0);dm_focus_set(1);}}
-static void paused(ANativeActivity *a) {game_app *s=a->instance;dm_touch_set(NULL,0);pad_clear(s);if(atomic_load(&s->started)){dm_focus_set(3);dm_audio_suspend(1);dm_gfx_suspend(1);}dm_android_performance_close();}
-static void destroyed(ANativeActivity *a) {game_app *s=a->instance;atomic_store(&s->debug_stop,1);if(atomic_load(&s->started))dm_host_shutdown("Android activity destroyed");pthread_mutex_lock(&s->lock);s->stop=1;pthread_cond_signal(&s->ready);pthread_mutex_unlock(&s->lock);pthread_join(s->worker,NULL);if(s->debug_started)pthread_join(s->debug_thread,NULL);if(s->window)ANativeWindow_release(s->window);free(s);application=NULL;}
+// 注意 onPause 里**不**挂起图形（Mac 的最小化路径有这一步，安卓不能照抄）：安卓在停下来之后一定会销毁窗口，
+// 而"请游戏存盘"排在窗口销毁之前（见 window_destroyed）。图形一旦在这里挂起，游戏线程就被挡在 NVN 入口外，
+// 请求的那次自动存盘永远等不到提交 —— 真机上就是这样，日志里只剩一条"未存盘退出"的红字。真正的挂起由
+// window_destroyed 的 detach 做，那时机在请存盘之后；而只要窗口销毁了，也就没有出图可做了。
+// Note that onPause does **not** suspend graphics (Mac's minimize path does; Android must not copy that): Android
+// always destroys the window once stopped, and the "ask the game to save" step is ordered before that destroy (see
+// window_destroyed). Suspending here parks the game thread outside NVN, so the requested autosave can never commit
+// — which is exactly what happened on device, leaving only a red "exited without saving" line. The real suspension
+// is done by detach in window_destroyed, after the save request; and once the window is gone there is no presenting
+// to do anyway.
+// 回前台这边另外照 iOS 补了两件事：① dm_3d_scale_resumed——回来头几秒的慢帧是恢复（表面重建、缓存变冷），
+// 不告诉控制器就会被当成 GPU 吃紧、把 3D 内部比例降下去；② 解除客体时钟冻结，与进后台时那次冻结配对。
+// Returning to the foreground also mirrors two things iOS does: ① dm_3d_scale_resumed — the slow frames in the
+// first seconds back are recovery (surface rebuild, cold caches), and without telling the controller they are read
+// as GPU pressure and the internal 3D ratio is scaled down; ② lifting the guest clock freeze, pairing with the
+// freeze taken when going to the background.
+static void resumed(ANativeActivity *a) {game_app *s=a->instance;atomic_store(&s->activity_resumed,1);dm_android_performance_resume();if(atomic_load(&s->started)){dm_3d_scale_resumed();dm_gfx_suspend(0);guest_clock_freeze_for(1,0);dm_audio_suspend(0);dm_focus_set(1);}}
+static void paused(ANativeActivity *a) {game_app *s=a->instance;atomic_store(&s->activity_resumed,0);dm_touch_set(NULL,0);pad_clear(s);if(atomic_load(&s->started)){dm_focus_set(3);dm_audio_suspend(1);}dm_android_performance_close();}
+static void destroyed(ANativeActivity *a) {game_app *s=a->instance;atomic_store(&s->debug_stop,1);
+    // 请存盘只做一次：正常退出时 window_destroyed 一定先跑过（安卓在 Activity 停止时必然先销毁窗口），而且那时
+    // 图形还没挂起、游戏跑得动，提交等得到。走到这里图形已经挂起，再请一次根本等不到提交，只会白等 3 秒再打一条
+    // 假的红色报警（真机上正常退出就是这样多出一条红字）。所以只有窗口还在（window_destroyed 没跑过）时才在这里请。
+    // Ask for a save only once: on a normal exit window_destroyed has always run first (Android always destroys the
+    // window when the activity stops), and back then graphics were not yet suspended so the game could make progress
+    // and the commit could arrive. Here graphics are already suspended, so asking again cannot produce a commit — it
+    // would only waste three seconds and log a false red alarm (which is exactly what a normal exit did on device).
+    // Ask here only when the window is still present, i.e. window_destroyed never ran.
+    pthread_mutex_lock(&s->lock);int window_present=s->window!=NULL;pthread_mutex_unlock(&s->lock);
+    if(atomic_load(&s->started)){if(window_present)settle_save();dm_host_shutdown("Android activity destroyed");}
+    pthread_mutex_lock(&s->lock);s->stop=1;pthread_cond_signal(&s->ready);pthread_mutex_unlock(&s->lock);pthread_join(s->worker,NULL);if(s->debug_started)pthread_join(s->debug_thread,NULL);if(s->window)ANativeWindow_release(s->window);free(s);application=NULL;}
 __attribute__((visibility("default"))) void ANativeActivity_onCreate(ANativeActivity *a,void *saved,size_t bytes) {
     // NativeActivity 自行 dlopen，不登记 Java 类加载器的 native 库；显式注册文本与触控回调。
     // NativeActivity dlopens its library without Java class-loader native-library registration; explicitly register text and touch callbacks.

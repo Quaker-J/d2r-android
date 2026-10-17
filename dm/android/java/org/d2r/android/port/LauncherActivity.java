@@ -58,10 +58,17 @@ public final class LauncherActivity extends Activity {
     private static final int WARNING = 0xffd08a78;
 
     private Switch overlaySwitch;
-    private TextView profileItem, importItem, statusView, startItem;
+    private TextView profileItem, resolutionItem, importItem, statusView, startItem;
     private boolean handheld;
+    private int resolutionIndex;
     private boolean importing;
     private volatile boolean cancelImport;
+    // 出图分辨率只提供几档预设：它是"主机档"尺寸，掌机档由 native 按 0.8 同比例缩放（与 Mac/iOS 同一语义）。
+    // 空字符串表示跟随档位（不写这个键，用原版 16:9 常数）。
+    // The output resolution offers a few presets only: it is the docked-profile size and the handheld profile is
+    // scaled by 0.8 inside native code, the same semantics as Mac and iOS. An empty string means "follow the
+    // profile", which writes no key and keeps the original 16:9 constants.
+    private static final String[] RESOLUTION_PRESETS = {"", "1920x1080", "2560x1440"};
 
     private String text(String key) {
         int resource = getResources().getIdentifier(key, "string", getPackageName());
@@ -144,6 +151,13 @@ public final class LauncherActivity extends Activity {
             text(handheld ? "dmAndroidLaunchHandheld" : "dmAndroidLaunchConsole");
     }
 
+    private String resolutionLabel() {
+        String preset = RESOLUTION_PRESETS[resolutionIndex];
+        if (preset.isEmpty()) return text("dmAndroidLaunchResolution") + "：" + text("dmAndroidLaunchFollowProfile");
+        String[] parts = preset.split("x");
+        return text("dmAndroidLaunchResolution") + "：" + parts[0] + "×" + parts[1];
+    }
+
     private String importLabel() {
         String summary = read(stateFile(), "package_summary");
         return summary == null ? text("dmAndroidLaunchImport") + "：" + text("dmAndroidLaunchNotSet")
@@ -158,12 +172,27 @@ public final class LauncherActivity extends Activity {
         startItem.setTextColor(ready ? GOLD : MUTED);
     }
 
+    // 把当前内存里的设置反映到界面上。点一下之后只调这个，**绝不重新读盘** ——
+    // 读盘会把刚改的内存值覆盖回去，结果就是点了没反应（分辨率与画面档位两行都曾如此）。
+    // Reflect the in-memory settings onto the labels. Click handlers call only this and never re-read from disk:
+    // reloading overwrites the value just changed, so tapping did nothing (true for both the resolution and the
+    // profile row).
+    private void applyLabels() {
+        if (profileItem != null) profileItem.setText(profileLabel());
+        if (resolutionItem != null) resolutionItem.setText(resolutionLabel());
+        if (importItem != null) importItem.setText(importLabel());
+        if (startItem != null) updateStartState();
+    }
+
+    // 从盘重读全部设置到内存，再刷新界面。只在进入/回到界面时调。
+    // Read every setting from disk into memory, then refresh the labels. Called only when the screen is (re)entered.
     private void refreshFromDisk() {
         handheld = !"console".equals(read(configFile(), "operation_mode"));
         if (overlaySwitch != null) overlaySwitch.setChecked(!"0".equals(read(configFile(), "debug_overlay")));
-        if (profileItem != null) profileItem.setText(profileLabel());
-        if (importItem != null) importItem.setText(importLabel());
-        if (startItem != null) updateStartState();
+        String preset = read(configFile(), "resolution");
+        resolutionIndex = 0;
+        if (preset != null) for (int i = 0; i < RESOLUTION_PRESETS.length; i++) if (RESOLUTION_PRESETS[i].equals(preset)) resolutionIndex = i;
+        applyLabels();
     }
 
     @Override public void onCreate(Bundle state) {
@@ -198,8 +227,12 @@ public final class LauncherActivity extends Activity {
         column.addView(overlaySwitch);
 
         profileItem = item(profileLabel(), 19, PARCHMENT, false, true);
-        profileItem.setOnClickListener(v -> { handheld = !handheld; refreshFromDisk(); });
+        profileItem.setOnClickListener(v -> { handheld = !handheld; applyLabels(); });
         column.addView(profileItem);
+
+        resolutionItem = item(resolutionLabel(), 19, PARCHMENT, false, true);
+        resolutionItem.setOnClickListener(v -> { resolutionIndex = (resolutionIndex + 1) % RESOLUTION_PRESETS.length; applyLabels(); });
+        column.addView(resolutionItem);
 
         importItem = item(importLabel(), 19, PARCHMENT, false, true);
         importItem.setOnClickListener(v -> pickPackage());
@@ -407,6 +440,9 @@ public final class LauncherActivity extends Activity {
         content.append("# 由启动界面写入 | written by the launcher\n");
         content.append("debug_overlay=").append(overlaySwitch.isChecked() ? "1" : "0").append('\n');
         content.append("operation_mode=").append(handheld ? "handheld" : "console").append('\n');
+        // 跟随档位时不写这个键：native 语义里"省略"就是不改动，保持原版 16:9 常数。
+        // "Follow profile" writes no key: omitting it means "leave it alone" to native, keeping the original 16:9 constants.
+        if (!RESOLUTION_PRESETS[resolutionIndex].isEmpty()) content.append("resolution=").append(RESOLUTION_PRESETS[resolutionIndex]).append('\n');
         write(configFile(), content.toString());
         setStatus("", PARCHMENT);
         startActivity(new Intent(this, D2RActivity.class));

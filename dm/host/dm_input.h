@@ -20,6 +20,18 @@ uint64_t dm_input_samples(void);   // 游戏已取手柄的累计次数 | Cumula
 // ORed bitwise and a stick uses the controller's value if it is non-zero. All 0 when no controller is connected, so values are bit-for-bit the same as before
 void dm_pad_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry);
 
+// 十字键可能是按键事件，也可能是 HAT 轴（不少手柄，含 Xbox，在安卓上报成 HAT）。这里只做轴到按键位的映射，
+// 好让它能在主机上单独验证：HAT_Y 负为上、正为下；阈值 ±0.5 容忍模拟量；两轴同时超阈值给斜向两位。
+// The D-pad arrives either as key events or as HAT axes (many pads, Xbox included, report it as HAT on Android).
+// This only maps axes to button bits so it can be verified on the host on its own: HAT_Y is negative up and
+// positive down, ±0.5 tolerates analogue hats, and both axes over the threshold give two diagonal bits.
+static inline uint64_t dm_pad_hat_buttons(float hat_x, float hat_y) {
+    uint64_t buttons = 0;
+    if (hat_x <= -0.5f) buttons |= DM_BTN_LEFT; else if (hat_x >= 0.5f) buttons |= DM_BTN_RIGHT;
+    if (hat_y <= -0.5f) buttons |= DM_BTN_UP; else if (hat_y >= 0.5f) buttons |= DM_BTN_DOWN;
+    return buttons;
+}
+
 // 可选诊断DM_HID_RECEIPT_LOG=<可写JSONL路径>：真实GetNpadState返回收样。
 // 字段read_start_ns/time_ns同宿主now_ns()；前端publish窗口必须同helper，读取区间跨发布不得强配。
 // 状态变化+最多每秒一次活动见证，1024条后limit_reached；未设环境变量不写文件。

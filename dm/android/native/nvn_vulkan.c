@@ -173,6 +173,105 @@ static int initialize_driver_fallback(const char *reason) {
 }
 #endif
 
+// 交换链与配套信号量/图像的建立。单独成函数，好让"从后台回来"能用新的 ANativeWindow 重建它：
+// 安卓在 Activity 停止时必然销毁窗口，而窗口贴图只在启动时建一次（dm_uiscreen.c），所以重返前台必须重建。
+// 只能在图形挂起期间调用 —— dm_gfx_suspend(1) 会把游戏线程挡在 NVN 入口之外，否则会与出图线程争交换链。
+// Swapchain plus its semaphores and images, as its own function so returning from the background can rebuild it
+// from a new ANativeWindow: Android always destroys the window when the activity stops, and the window texture is
+// created only once at startup (dm_uiscreen.c). Call it only while graphics are suspended — dm_gfx_suspend(1)
+// parks the game thread outside NVN — otherwise it races the presenting thread.
+static void screen_create_swapchain(struct ANativeWindow *window) {
+    if (!surface || !device) return;
+    VkSurfaceCapabilitiesKHR cap; VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical, surface, &cap));
+    if (!(cap.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT)) die("Vulkan surface has no transfer destination support");
+    uint32_t nf; VK_CHECK(vkGetPhysicalDeviceSurfaceFormatsKHR(physical, surface, &nf, NULL)); VkSurfaceFormatKHR *formats = calloc(nf, sizeof *formats); if (!formats) die("Vulkan surface format allocation"); VK_CHECK(vkGetPhysicalDeviceSurfaceFormatsKHR(physical, surface, &nf, formats));
+    VkSurfaceFormatKHR format = formats[0]; for (unsigned i = 0; i < nf; ++i) if (formats[i].format == VK_FORMAT_R8G8B8A8_UNORM || formats[i].format == VK_FORMAT_B8G8R8A8_UNORM) { format = formats[i]; break; } free(formats);
+    screen_extent = cap.currentExtent;
+#ifdef __ANDROID__
+    if (screen_extent.width == UINT32_MAX && window) screen_extent = (VkExtent2D){ANativeWindow_getWidth(window), ANativeWindow_getHeight(window)};
+#endif
+    uint32_t images = cap.minImageCount + 1; if (cap.maxImageCount && images > cap.maxImageCount) images = cap.maxImageCount;
+    VkCompositeAlphaFlagBitsKHR alpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR; if (!(cap.supportedCompositeAlpha & alpha)) alpha = cap.supportedCompositeAlpha & -cap.supportedCompositeAlpha;
+    // 最终 blit 输出是窗口坐标下的正向图像，没有预旋转；由合成器处理屏幕方向。
+    // The final blit produces an upright window-space image, not a pre-rotated image; let the compositor handle display orientation.
+    VkSurfaceTransformFlagBitsKHR transform = (cap.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR : cap.currentTransform;
+    LOG("[vulkan-surface-transform] supported=%#x current=%#x selected=%#x extent=%ux%u upright_blit=1",cap.supportedTransforms,cap.currentTransform,transform,screen_extent.width,screen_extent.height);
+    VkSwapchainCreateInfoKHR ci = {.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .surface = surface, .minImageCount = images, .imageFormat = format.format, .imageColorSpace = format.colorSpace, .imageExtent = screen_extent, .imageArrayLayers = 1, .imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT, .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, .preTransform = transform, .compositeAlpha = alpha, .presentMode = VK_PRESENT_MODE_FIFO_KHR, .clipped = VK_TRUE};
+    VK_CHECK(vkCreateSwapchainKHR(device, &ci, NULL, &swapchain)); VK_CHECK(vkGetSwapchainImagesKHR(device, swapchain, &screen_count, NULL)); screen_images = calloc(screen_count, sizeof *screen_images); screen_initialized = calloc(screen_count, 1); if (!screen_images || !screen_initialized) die("Vulkan swapchain image allocation"); VK_CHECK(vkGetSwapchainImagesKHR(device, swapchain, &screen_count, screen_images));
+    // present 消费完成由同一 image 的再次 acquire/wait 保证，不能用提交 fence 推断。
+    // Reacquiring/waiting on the same image proves its present wait consumed; a submission fence does not.
+    screen_present_wait=calloc(screen_count,sizeof *screen_present_wait);if(!screen_present_wait)die("Vulkan present semaphore allocation");
+    VkSemaphoreCreateInfo sem = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO}; VK_CHECK(vkCreateSemaphore(device, &sem, NULL, &screen_acquired));
+    for(unsigned i=0;i<screen_count;i++)VK_CHECK(vkCreateSemaphore(device,&sem,NULL,&screen_present_wait[i]));
+    LOG("[vulkan] Android game surface %ux%u images=%u", screen_extent.width, screen_extent.height, screen_count);
+}
+
+// 释放表面与交换链。销毁前先等队列空闲：调用点已经挂起图形，这里再把在途提交排空，
+// 免得销毁的对象还被队列引用。surface 与交换链同生同死 —— 它绑在那一块 ANativeWindow 上。
+// Release the surface and swapchain. Wait for the queue first: the caller has suspended graphics, and this drains
+// whatever submission is still in flight so nothing is destroyed while the queue references it. The surface dies
+// with the swapchain because it is bound to that particular ANativeWindow.
+static void screen_release(void) {
+    if (!device) return;
+    pthread_mutex_lock(&queue_lock); VK_CHECK(vkQueueWaitIdle(queue)); pthread_mutex_unlock(&queue_lock);
+    if (swapchain) { vkDestroySwapchainKHR(device, swapchain, NULL); swapchain = VK_NULL_HANDLE; }
+    if (screen_acquired) { vkDestroySemaphore(device, screen_acquired, NULL); screen_acquired = VK_NULL_HANDLE; }
+    if (screen_present_wait) { for (uint32_t i = 0; i < screen_count; i++) if (screen_present_wait[i]) vkDestroySemaphore(device, screen_present_wait[i], NULL); free(screen_present_wait); screen_present_wait = NULL; }
+    free(screen_images); screen_images = NULL; free(screen_initialized); screen_initialized = NULL;
+    screen_count = 0; screen_acquire_ticket = 0; screen_extent = (VkExtent2D){0, 0};
+    if (surface) { vkDestroySurfaceKHR(instance, surface, NULL); surface = VK_NULL_HANDLE; }
+}
+
+#ifdef __ANDROID__
+// 单独构建的 GPU 夹具（build_gpu_fixtures.py）只链到本文件，不含宿主图形层，所以这里允许 dm_gfx_suspend 缺失：
+// 没有它就不挂起 —— 夹具里也没有并发出图，不存在要防的竞争。
+// The standalone GPU fixtures (build_gpu_fixtures.py) link only this file and not the host graphics layer, so
+// dm_gfx_suspend is allowed to be absent: without it we simply do not suspend, and the fixtures have no concurrent
+// presenting to race against anyway.
+__attribute__((weak)) void dm_gfx_suspend(int on);
+// 窗口销毁 / 新建时由前端调用。窗口销毁不再等于退出进程：安卓在 Activity 停止时必然销毁窗口，
+// 保留进程才能在回到前台时接着玩；真正的退出走 destroyed() 那条路。
+// Called by the front end when the window goes away or appears. A destroyed window no longer means the process
+// ends: Android always destroys it when the activity stops, and keeping the process is what lets play resume on
+// return. A real exit goes through the destroyed() path.
+void mtl_screen_detach(void) {
+    // 这里**不**调 mtl_init：那会在回调线程（UI 线程）上把整个 Vulkan 后端初始化起来。
+    // 后端只由游戏线程在第一次出图时初始化，所以后端还没活就直接返回 —— 那时也没有交换链要释放。
+    // mtl_init is deliberately not called here: it would initialise the whole Vulkan backend on the callback
+    // thread (the UI thread). The backend is only ever initialised by the game thread on its first present, so
+    // when it is not live yet, return — there is no swapchain to release then either.
+    if (!instance || !device) return;
+    // 自己再挂起一次：window_destroyed 与 paused 的先后顺序不保证，挂起是幂等的，先挂起来才不会与出图线程抢。
+    // Suspend here as well: the order of window_destroyed and paused is not guaranteed, suspending is idempotent,
+    // and doing it first is what keeps this from racing the presenting thread.
+    if (dm_gfx_suspend) dm_gfx_suspend(1);
+    screen_release();
+    LOG("[android] 窗口销毁：表面与交换链已释放，进程保留");
+}
+void mtl_screen_attach(struct ANativeWindow *window) {
+    // 同上：不在回调线程上初始化后端；后端还没活时，第一次出图会自己建好表面与交换链。
+    // Same as above: never initialise the backend on the callback thread; when it is not live yet, the first
+    // present builds the surface and swapchain itself.
+    if (!instance || !device || !window) return;
+    // 先挂起再动交换链，与 detach 同理：安卓给窗口的时机在 onResume **之后**（真机日志实测的顺序是
+    // 图形恢复 → 窗口重建），也就是轮到重建时游戏线程已经放开了，正可能在某次出图里读 screen_images /
+    // swapchain。挂起会把新进入的出图挡住、并等在途那次退出（gfx_enter/gfx_leave），这里才是唯一安全的点。
+    // 后面由前端按"当前是否在前台"决定何时放开 —— 只能由它决定，因为这个回调可能早于或晚于 onResume。
+    // Suspend before touching the swapchain, for the same reason as in detach: Android hands the window over
+    // *after* onResume (measured on device: 图形恢复 then 窗口重建), so by the time this runs the game thread is
+    // already free and may be inside a present reading screen_images / swapchain. Suspending blocks new entries
+    // and waits out the one in flight (gfx_enter/gfx_leave), which is what makes this point safe. Releasing it is
+    // left to the front end, which alone knows whether the app is in the foreground: this callback can arrive
+    // either side of onResume.
+    if (dm_gfx_suspend) dm_gfx_suspend(1);
+    screen_release();
+    VkAndroidSurfaceCreateInfoKHR si = {.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR, .window = window};
+    VK_CHECK(vkCreateAndroidSurfaceKHR(instance, &si, NULL, &surface));
+    screen_create_swapchain(window);
+    LOG("[android] 窗口重建：新的表面与交换链已就绪");
+}
+#endif
+
 static void initialize(void) {
     // 与原 NVN 后端使用相同默认状态；显式指令随后覆盖，不能改写合法深度范围。
     // Match the original NVN defaults; explicit commands override them without rewriting legal depth ranges.
@@ -296,28 +395,11 @@ driver_retry:;
         LOG("[vulkan] GPU timestamps bits=%u period=%.6f ns",gpu_timestamp_bits,gpu_timestamp_period);
     }
     if (surface) {
-        VkSurfaceCapabilitiesKHR cap; VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical, surface, &cap));
-        if (!(cap.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT)) die("Vulkan surface has no transfer destination support");
-        uint32_t nf; VK_CHECK(vkGetPhysicalDeviceSurfaceFormatsKHR(physical, surface, &nf, NULL)); VkSurfaceFormatKHR *formats = calloc(nf, sizeof *formats); if (!formats) die("Vulkan surface format allocation"); VK_CHECK(vkGetPhysicalDeviceSurfaceFormatsKHR(physical, surface, &nf, formats));
-        VkSurfaceFormatKHR format = formats[0]; for (unsigned i = 0; i < nf; ++i) if (formats[i].format == VK_FORMAT_R8G8B8A8_UNORM || formats[i].format == VK_FORMAT_B8G8R8A8_UNORM) { format = formats[i]; break; } free(formats);
-        screen_extent = cap.currentExtent;
 #ifdef __ANDROID__
-        if (screen_extent.width == UINT32_MAX) screen_extent = (VkExtent2D){ANativeWindow_getWidth(window), ANativeWindow_getHeight(window)};
+        screen_create_swapchain(window);
+#else
+        screen_create_swapchain(NULL);
 #endif
-        uint32_t images = cap.minImageCount + 1; if (cap.maxImageCount && images > cap.maxImageCount) images = cap.maxImageCount;
-        VkCompositeAlphaFlagBitsKHR alpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR; if (!(cap.supportedCompositeAlpha & alpha)) alpha = cap.supportedCompositeAlpha & -cap.supportedCompositeAlpha;
-        // 最终 blit 输出是窗口坐标下的正向图像，没有预旋转；由合成器处理屏幕方向。
-        // The final blit produces an upright window-space image, not a pre-rotated image; let the compositor handle display orientation.
-        VkSurfaceTransformFlagBitsKHR transform = (cap.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR : cap.currentTransform;
-        LOG("[vulkan-surface-transform] supported=%#x current=%#x selected=%#x extent=%ux%u upright_blit=1",cap.supportedTransforms,cap.currentTransform,transform,screen_extent.width,screen_extent.height);
-        VkSwapchainCreateInfoKHR ci = {.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .surface = surface, .minImageCount = images, .imageFormat = format.format, .imageColorSpace = format.colorSpace, .imageExtent = screen_extent, .imageArrayLayers = 1, .imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT, .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, .preTransform = transform, .compositeAlpha = alpha, .presentMode = VK_PRESENT_MODE_FIFO_KHR, .clipped = VK_TRUE};
-        VK_CHECK(vkCreateSwapchainKHR(device, &ci, NULL, &swapchain)); VK_CHECK(vkGetSwapchainImagesKHR(device, swapchain, &screen_count, NULL)); screen_images = calloc(screen_count, sizeof *screen_images); screen_initialized = calloc(screen_count, 1); if (!screen_images || !screen_initialized) die("Vulkan swapchain image allocation"); VK_CHECK(vkGetSwapchainImagesKHR(device, swapchain, &screen_count, screen_images));
-        // present 消费完成由同一 image 的再次 acquire/wait 保证，不能用提交 fence 推断。
-        // Reacquiring/waiting on the same image proves its present wait consumed; a submission fence does not.
-        screen_present_wait=calloc(screen_count,sizeof *screen_present_wait);if(!screen_present_wait)die("Vulkan present semaphore allocation");
-        VkSemaphoreCreateInfo sem = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO}; VK_CHECK(vkCreateSemaphore(device, &sem, NULL, &screen_acquired));
-        for(unsigned i=0;i<screen_count;i++)VK_CHECK(vkCreateSemaphore(device,&sem,NULL,&screen_present_wait[i]));
-        LOG("[vulkan] Android game surface %ux%u images=%u", screen_extent.width, screen_extent.height, screen_count);
     }
     // 最后启动后台管线预热：读本机积累与随包种子清单，把首次驱动编译从游戏内挪到启动/读取画面（nvn_vulkan_warm.inc）。
     // Start background pipeline warm-up last: read the local accumulation and the shipped seed manifest, moving first driver compilations from gameplay to start-up / the loading screen (nvn_vulkan_warm.inc).

@@ -72,6 +72,7 @@ uint64_t dm_nvn_sub_cpu_ns(void);     // 提交（不含出图）累计 CPU 纳�
 int dm_ingame_now(void);              // 是否在局内（diag.c） | Whether we are in a run (diag.c)
 void dm_3d_scale_feed(double iv_ms);   // 出图线程每帧报实际上屏间隔（−1 丢弃 / 0 无读数），驱动动态 3D 比例 | The present thread reports the actual present interval every frame (−1 discard / 0 no reading), driving the dynamic 3D scale
 float dm_3d_scale_cur(void);          // 当前生效的 3D 渲染比例（hle_oe.c scale3d_tick）     // 当前累计出图帧数（DM_TICKS 对齐观测） | The 3D render scale currently in effect (hle_oe.c scale3d_tick)     // current cumulative count of presented frames (for DM_TICKS alignment observation)
+void dm_3d_scale_resumed(void);       // 前端：刚回前台。回来头几秒的慢帧是恢复（表面重建、缓存变冷），不是 GPU 吃紧：停判 3 秒 | front end: just returned to the foreground. Slow frames in the first seconds back are recovery (surface rebuild, caches gone cold), not GPU pressure: stop judging for 3 seconds
 void dm_backtrace(uint64_t fp);
 void crash_watch_progress(uint32_t tick, const char *stage);
 void crash_watch_frame(void);

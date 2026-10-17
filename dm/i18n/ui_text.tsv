@@ -363,5 +363,7 @@ dmAndroidLaunchImporting	正在导入 %d%%	Importing %d%%	Android 启动界面
 dmAndroidLaunchImportSummary	%d 个资源、%d 个着色器	%d assets, %d shaders	Android 启动界面
 dmAndroidLaunchImportFailed	导入失败：%s	Import failed: %s	Android 启动界面
 dmAndroidLaunchCancel	正在取消…	Cancelling…	Android 启动界面
+dmAndroidLaunchResolution	分辨率	Resolution	Android 启动界面
+dmAndroidLaunchFollowProfile	跟随档位	Follow profile	Android 启动界面
 dmAndroidLaunchNeedsImport	还没有数据包，请先导入再启动游戏	No package yet; import one before starting the game	Android 启动界面
 dmAndroidLaunchPending	数据包由电脑端生成（见 docs/ANDROID_PACKAGE.zh-CN.md），导入后即可启动	The package is produced on a PC (see docs/ANDROID_PACKAGE.zh-CN.md); import it to start	Android 启动界面
