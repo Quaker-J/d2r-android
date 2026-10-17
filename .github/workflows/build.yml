@@ -37,6 +37,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      # make_probe → patch_nso 要 lz4 与 capstone（本机构建时它们来自项目 venv）。
+      # make_probe -> patch_nso needs lz4 and capstone; locally those come from the project's venv.
+      - name: Python 依赖
+        run: python3 -m pip install --disable-pip-version-check lz4 capstone
+
       - name: 计算工具链缓存键
         id: tools
         run: echo "key=${{ hashFiles('dm/android/tools/bootstrap.py') }}" >> "$GITHUB_OUTPUT"

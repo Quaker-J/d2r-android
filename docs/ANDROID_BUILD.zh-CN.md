@@ -76,7 +76,7 @@ RomFS和着色器仅首次或资源版本变化时部署；更新APK保留应用
 | `D2R-Android-port.apk` | **通用 APK**：宿主与前端完整，但**不含游戏代码**（15 MB 量级）。游戏模块由手机端导入的数据包提供；启动界面本来就要求先导入才能启动。真机验证过：装上它 + 导入数据包即可进游戏。 |
 | `d2r-package-kit-<版本>.zip` | 给玩家电脑用的**打包套件**：项目源码（打包工具在里面）+ `.claude/skills/d2r-package/` 技能 + 上面那个 APK + 一页说明。解压后把文件夹交给 AI 助手即可。 |
 
-流程：`checkout → bootstrap.py 装工具链（NDK/JDK/build-tools，约 800 MB，按 bootstrap.py 内容缓存）→ ci_checks.py → build.py --game-run（不带 --game-source，即"通用包"）→ make_kit.py → 上传制品`。
+流程：`checkout → pip 装 lz4/capstone（make_probe 会调 patch_nso）→ bootstrap.py 装工具链（NDK/JDK/build-tools，约 800 MB，按 bootstrap.py 内容缓存）→ ci_checks.py → build.py --game-run（不带 --game-source，即"通用包"）→ make_kit.py → 上传制品`。
 
 **发布给玩家**：推一个 tag 即可，流水线会建 Release 并把 APK 与套件挂上去：
 
