@@ -24,7 +24,15 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.FrameLayout;
 import android.widget.PopupWindow;
+import android.widget.Toast;
+import android.net.Uri;
 import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
 import android.view.Gravity;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
@@ -52,6 +60,12 @@ public final class D2RActivity extends NativeActivity {
     private static native void setOverlayEnabled(boolean enabled);
     private static native void setQualityPreset(int preset);
     private static native void setMenuOpen(boolean open);
+    private static native void setSkipSaveOnExit(boolean skip);
+
+    // 存档导入/导出的文件选择器请求码（与文本输入等其它结果回调区分开）。
+    // Request codes for the save pickers, kept apart from the other result callbacks.
+    private static final int EXPORT_SAVE = 21;
+    private static final int IMPORT_SAVE = 22;
 
     // ---------- 游戏内菜单（返回键呼出，照 Eden 那样）----------
     // 返回键在安卓上默认结束当前页面，而本移植里结束游戏页面 = 结束整个进程（一个进程只跑一个游戏）；
@@ -140,6 +154,17 @@ public final class D2RActivity extends NativeActivity {
         menuQualityRow = menuRow();
         menuQualityRow.setOnClickListener(v -> { qualityPreset = (qualityPreset + 1) % QUALITY_KEYS.length; setQualityPreset(QUALITY_LEVELS[qualityPreset]); updateMenuLabels(); });
         column.addView(menuQualityRow);
+        // 存档导入 / 导出：走系统的文件选择器，导出到玩家选的位置（下载目录等），导入也是玩家选文件。
+        // Save import/export goes through the system file picker: export writes to wherever the player picks
+        // (Downloads and so on), import reads a file the player picks.
+        TextView exportRow = menuRow();
+        exportRow.setText(text("dmAndroidSaveExport"));
+        exportRow.setOnClickListener(v -> { hideMenu(); startSaveExport(); });
+        column.addView(exportRow);
+        TextView importRow = menuRow();
+        importRow.setText(text("dmAndroidSaveImport"));
+        importRow.setOnClickListener(v -> confirmImportSave());
+        column.addView(importRow);
         TextView exitRow = menuRow();
         exitRow.setTextColor(GOLD);
         exitRow.setText(text("dmAndroidMenuExit"));
@@ -170,6 +195,92 @@ public final class D2RActivity extends NativeActivity {
     private void persistOverlay() {
         File file = configFile();
         if (file != null) LaunchSettings.write(file, "debug_overlay", overlayEnabled ? "1" : "0");
+    }
+
+    // ---------- 存档导入 / 导出（游戏内）----------
+    // 导出走系统的"新建文档"选择器，玩家自己选存到哪（下载目录等），应用不需要存储权限。
+    // Export uses the system "create document" picker so the player chooses where it lands (Downloads and so on);
+    // the app needs no storage permission.
+    private File saveDirectory() { return new File(getFilesDir(), "save"); }
+
+    private void startSaveExport() {
+        if (!saveDirectory().isDirectory()) {
+            Toast.makeText(this, text("dmAndroidSaveNone"), Toast.LENGTH_SHORT).show();
+            return;
+        }
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("application/zip");
+        intent.putExtra(Intent.EXTRA_TITLE, "d2r-save-" + new SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(new Date()) + ".zip");
+        try {
+            startActivityForResult(intent, EXPORT_SAVE);
+        } catch (RuntimeException error) {
+            Toast.makeText(this, String.format(text("dmAndroidSaveExportFailed"), String.valueOf(error.getMessage())), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    // 游戏内导入必须先退出游戏：这局的内存状态不能再去覆盖导入的存档（退出前请存盘那一步会跳过），
+    // 下次启动加载的就是导入的存档。确认框把这一点写明，免得玩家以为是"就地换档"。
+    // Importing from a running game has to exit first: the live in-memory state must not overwrite the imported
+    // save (the save-on-exit step is skipped) and the next launch loads what was imported. The confirmation says
+    // so, so nobody expects an in-place swap.
+    private void confirmImportSave() {
+        new AlertDialog.Builder(this)
+                .setMessage(text("dmAndroidSaveImportConfirmGame"))
+                .setPositiveButton(android.R.string.ok, (dialog, which) -> { hideMenu(); pickSaveArchive(); })
+                .setNegativeButton(android.R.string.cancel, null)
+                .show();
+    }
+
+    private void pickSaveArchive() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");   // 有的提供方把 zip 报成 octet-stream | some providers report a zip as octet-stream
+        try {
+            startActivityForResult(intent, IMPORT_SAVE);
+        } catch (RuntimeException error) {
+            Toast.makeText(this, String.format(text("dmAndroidSaveImportFailed"), String.valueOf(error.getMessage())), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    @Override protected void onActivityResult(int request, int result, Intent data) {
+        super.onActivityResult(request, result, data);
+        if (result != RESULT_OK || data == null || data.getData() == null) return;
+        if (request == EXPORT_SAVE) writeSaveArchive(data.getData());
+        else if (request == IMPORT_SAVE) readSaveArchive(data.getData());
+    }
+
+    private void writeSaveArchive(Uri target) {
+        try (OutputStream out = getContentResolver().openOutputStream(target)) {
+            if (out == null) throw new IOException("无法写入所选位置");
+            int files = SaveArchive.zip(saveDirectory(), out, System.currentTimeMillis());
+            Toast.makeText(this, String.format(text("dmAndroidSaveExported"), files), Toast.LENGTH_SHORT).show();
+            Log.i("D2RAndroid", "[save] exported files=" + files);
+        } catch (Exception error) {
+            Toast.makeText(this, String.format(text("dmAndroidSaveExportFailed"), String.valueOf(error.getMessage())), Toast.LENGTH_LONG).show();
+            Log.e("D2RAndroid", "[save] export failed", error);
+        }
+    }
+
+    private void readSaveArchive(Uri source) {
+        File staging = new File(getFilesDir(), "save.import");
+        SaveArchive.deleteTree(staging);
+        try (InputStream in = getContentResolver().openInputStream(source)) {
+            if (in == null) throw new IOException("无法读取所选文件");
+            int files = SaveArchive.unzip(in, staging);
+            SaveArchive.replace(saveDirectory(), staging);
+            // 先让退出路径别存盘，再退出：否则旧的内存状态会把刚导入的存档覆盖掉。
+            // Stop the exit path from saving first, then exit: otherwise the stale in-memory state would overwrite
+            // the save that was just imported.
+            setSkipSaveOnExit(true);
+            Toast.makeText(this, String.format(text("dmAndroidSaveImported"), files), Toast.LENGTH_SHORT).show();
+            Log.i("D2RAndroid", "[save] imported files=" + files + ", exiting to reload");
+            finish();
+        } catch (Exception error) {
+            SaveArchive.deleteTree(staging);
+            Toast.makeText(this, String.format(text("dmAndroidSaveImportFailed"), String.valueOf(error.getMessage())), Toast.LENGTH_LONG).show();
+            Log.e("D2RAndroid", "[save] import failed", error);
+        }
     }
 
     // 电池读数由框架提供（system_server 读内核节点、经 Binder 返回），应用不需要 root；

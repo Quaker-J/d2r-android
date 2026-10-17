@@ -6,6 +6,7 @@
 package org.d2r.android.port;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Intent;
 import android.graphics.Typeface;
 import android.net.Uri;
@@ -33,6 +34,9 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
@@ -51,6 +55,8 @@ public final class LauncherActivity extends Activity {
     private static final String MANIFEST_NAME = "manifest.json";
     private static final String[] ALLOWED_PREFIXES = {"game/", "romfs/", "shaders/"};
     private static final int PICK_PACKAGE = 1;
+    private static final int EXPORT_SAVE = 2;
+    private static final int IMPORT_SAVE = 3;
 
     private static final int GOLD = 0xffe8c078;
     private static final int PARCHMENT = 0xffe8e0d0;
@@ -257,6 +263,16 @@ public final class LauncherActivity extends Activity {
         importItem.setOnClickListener(v -> pickPackage());
         column.addView(importItem);
 
+        // 存档导入/导出：走系统的文件选择器（应用不需要任何存储权限），包是玩家自己选的路径。
+        // Save import/export goes through the system file picker (the app needs no storage permission); the player
+        // picks the location.
+        TextView saveExportItem = item(text("dmAndroidSaveExport"), 19, PARCHMENT, false, true);
+        saveExportItem.setOnClickListener(v -> exportSave());
+        column.addView(saveExportItem);
+        TextView saveImportItem = item(text("dmAndroidSaveImport"), 19, PARCHMENT, false, true);
+        saveImportItem.setOnClickListener(v -> confirmImportSave());
+        column.addView(saveImportItem);
+
         column.addView(new View(this), new LinearLayout.LayoutParams(1, 0, 1f));
 
         statusView = item("", 14, WARNING, false, false);
@@ -301,10 +317,83 @@ public final class LauncherActivity extends Activity {
         }
     }
 
+    // ---------- 存档导入 / 导出 ----------
+    // 存档在内部目录 files/save/（角色、共享仓库、Settings 三个目录）；导出就是把它整棵树打成 zip，
+    // 导入是"解到临时目录 → 校验 → 原子换入"，失败的导入不会动到现有存档（换入前旧目录还在）。
+    // The save lives in the internal files/save/ (character, shared stash, Settings); export zips the whole tree,
+    // import is "unpack to a staging directory -> validate -> swap in", and a failed import never touches the
+    // existing save (the old directory is still there until the swap).
+    private File saveDirectory() { return new File(getFilesDir(), "save"); }
+
+    // 文件名带时间戳，方便留多份；玩家仍可在选择器里改名。| Timestamped so several copies are easy; renameable in the picker.
+    private String saveArchiveName() {
+        return "d2r-save-" + new SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(new Date()) + ".zip";
+    }
+
+    private void exportSave() {
+        if (!saveDirectory().isDirectory()) { setStatus(text("dmAndroidSaveNone"), WARNING); return; }
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("application/zip");
+        intent.putExtra(Intent.EXTRA_TITLE, saveArchiveName());
+        try {
+            startActivityForResult(intent, EXPORT_SAVE);
+        } catch (RuntimeException error) {
+            setStatus(String.format(text("dmAndroidSaveExportFailed"), String.valueOf(error.getMessage())), WARNING);
+        }
+    }
+
+    private void confirmImportSave() {
+        new AlertDialog.Builder(this)
+                .setMessage(text("dmAndroidSaveImportConfirm"))
+                .setPositiveButton(android.R.string.ok, (dialog, which) -> pickSaveArchive())
+                .setNegativeButton(android.R.string.cancel, null)
+                .show();
+    }
+
+    private void pickSaveArchive() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        // 与选数据包同样的理由：有的提供方把 zip 报成 octet-stream，类型放宽，否则文件在选择器里是灰的。
+        // Same reason as the package picker: some providers report a zip as octet-stream, so the type is left open.
+        intent.setType("*/*");
+        try {
+            startActivityForResult(intent, IMPORT_SAVE);
+        } catch (RuntimeException error) {
+            setStatus(String.format(text("dmAndroidSaveImportFailed"), String.valueOf(error.getMessage())), WARNING);
+        }
+    }
+
+    private void writeSaveArchive(Uri target) {
+        try (OutputStream out = getContentResolver().openOutputStream(target)) {
+            if (out == null) throw new IOException("无法写入所选位置");
+            int files = SaveArchive.zip(saveDirectory(), out, System.currentTimeMillis());
+            setStatus(String.format(text("dmAndroidSaveExported"), files), PARCHMENT);
+        } catch (Exception error) {
+            setStatus(String.format(text("dmAndroidSaveExportFailed"), String.valueOf(error.getMessage())), WARNING);
+        }
+    }
+
+    private void readSaveArchive(Uri source) {
+        File staging = new File(getFilesDir(), "save.import");
+        SaveArchive.deleteTree(staging);
+        try (InputStream in = getContentResolver().openInputStream(source)) {
+            if (in == null) throw new IOException("无法读取所选文件");
+            int files = SaveArchive.unzip(in, staging);
+            SaveArchive.replace(saveDirectory(), staging);
+            setStatus(String.format(text("dmAndroidSaveImported"), files), PARCHMENT);
+        } catch (Exception error) {
+            SaveArchive.deleteTree(staging);
+            setStatus(String.format(text("dmAndroidSaveImportFailed"), String.valueOf(error.getMessage())), WARNING);
+        }
+    }
+
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
-        if (request != PICK_PACKAGE || result != RESULT_OK || data == null || data.getData() == null) return;
-        beginImport(data.getData());
+        if (result != RESULT_OK || data == null || data.getData() == null) return;
+        if (request == EXPORT_SAVE) { writeSaveArchive(data.getData()); return; }
+        if (request == IMPORT_SAVE) { readSaveArchive(data.getData()); return; }
+        if (request == PICK_PACKAGE) beginImport(data.getData());
     }
 
     private void beginImport(Uri uri) {

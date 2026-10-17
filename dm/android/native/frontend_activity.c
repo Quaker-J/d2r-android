@@ -45,6 +45,11 @@ static _Atomic int debug_overlay_enabled;
 // Is the in-game menu open (see input_ready): while it is, pad and key events are swallowed so the character does
 // not keep moving behind the menu.
 static _Atomic int menu_open;
+// 游戏内导入存档后要退出：这一次退出**不能**再请游戏存盘 —— 否则会把刚导入的存档用旧的内存状态覆盖掉。
+// 一次性的：被 settle_save 消费后清零。
+// After importing a save from the in-game menu the game exits, and that exit must NOT ask the game to save -- the
+// save just imported would otherwise be overwritten with the stale in-memory state. One-shot: cleared by settle_save.
+static _Atomic int skip_save_once;
 int dm_android_display_hz(void) {return atomic_load(&display_hz);}
 static pthread_once_t frame_rate_once=PTHREAD_ONCE_INIT;
 static int32_t (*window_set_frame_rate)(ANativeWindow *,float,int8_t);
@@ -349,6 +354,9 @@ __attribute__((visibility("default"))) void Java_org_d2r_android_port_D2RActivit
 __attribute__((visibility("default"))) void Java_org_d2r_android_port_D2RActivity_setMenuOpen(JNIEnv *env,jclass klass,jboolean open) {
     (void)env;(void)klass;atomic_store(&menu_open,open?1:0);
 }
+__attribute__((visibility("default"))) void Java_org_d2r_android_port_D2RActivity_setSkipSaveOnExit(JNIEnv *env,jclass klass,jboolean skip) {
+    (void)env;(void)klass;atomic_store(&skip_save_once,skip?1:0);
+}
 __attribute__((visibility("default"))) void Java_org_d2r_android_port_D2RActivity_onTouchPad(JNIEnv *env,jclass klass,jlong buttons,jint lx,jint ly,jint rx,jint ry) {
     (void)env;(void)klass;game_app *s=application;if(!s)return;
     // Java 窗口触控和 AInputQueue 都在 Activity 的主 Looper；统一走 HLE 的短按锁存。
@@ -438,6 +446,10 @@ static int input_ready(int fd,int events,void *data) {
 // lost. Mac (app_quit in front_mac.m) and iOS (going to background) already do this; Android did not. Failing to
 // get a commit is logged loudly rather than left to look like a successful save.
 static void settle_save(void) {
+    // 刚导入过存档（游戏内菜单）：这次退出不写盘，否则旧的内存状态会把导入的存档盖掉。
+    // A save was just imported (from the in-game menu): skip writing on this exit, otherwise the stale in-memory
+    // state would overwrite the imported save.
+    if(atomic_exchange(&skip_save_once,0)){LOG("[android] 跳过存盘：刚导入存档，本次退出不再写盘");return;}
     int dm_ingame_now(void);int dm_uiscreen_ingame(void);int dm_request_save(void);int dm_unpause_for_exit(void);uint64_t dm_fs_commit_count(void);uint64_t now_ns(void);
     if(!dm_ingame_now()&&!dm_uiscreen_ingame()){LOG("[android] 退出：不在局内，没有待存的进度");return;}
     // 暂停菜单/面板开着时游戏不跑拍，拨的那次存盘等不到，所以先放开暂停（不写回）。
@@ -526,7 +538,8 @@ __attribute__((visibility("default"))) void ANativeActivity_onCreate(ANativeActi
         {"onTouchPad","(JIIII)V",(void*)Java_org_d2r_android_port_D2RActivity_onTouchPad},
         {"setOverlayEnabled","(Z)V",(void*)Java_org_d2r_android_port_D2RActivity_setOverlayEnabled},
         {"setQualityPreset","(I)V",(void*)Java_org_d2r_android_port_D2RActivity_setQualityPreset},
-        {"setMenuOpen","(Z)V",(void*)Java_org_d2r_android_port_D2RActivity_setMenuOpen}
+        {"setMenuOpen","(Z)V",(void*)Java_org_d2r_android_port_D2RActivity_setMenuOpen},
+        {"setSkipSaveOnExit","(Z)V",(void*)Java_org_d2r_android_port_D2RActivity_setSkipSaveOnExit}
     };
     if((*a->env)->RegisterNatives(a->env,klass,methods,sizeof methods/sizeof methods[0])!=JNI_OK){(*a->env)->ExceptionDescribe(a->env);(*a->env)->ExceptionClear(a->env);ANativeActivity_finish(a);return;}(*a->env)->DeleteLocalRef(a->env,klass);
     (void)saved;(void)bytes;game_app *s=calloc(1,sizeof *s);if(!s){ANativeActivity_finish(a);return;}s->activity=a;a->instance=s;application=s;pthread_mutex_init(&s->lock,NULL);pthread_cond_init(&s->ready,NULL);
