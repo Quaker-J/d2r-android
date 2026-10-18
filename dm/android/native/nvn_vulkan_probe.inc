@@ -278,7 +278,11 @@ static void graphics_probe_capture(uint64_t frame) {
         read->readback=buffer_create(bytes);VkBufferMemoryBarrier source={.sType=VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,.srcAccessMask=VK_ACCESS_MEMORY_WRITE_BIT,.dstAccessMask=VK_ACCESS_TRANSFER_READ_BIT,.srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,.buffer=read->source.buffer,.offset=aligned,.size=bytes};
         vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,NULL,1,&source,0,NULL);VkBufferCopy copy={.srcOffset=aligned,.size=bytes};vkCmdCopyBuffer(command,read->source.buffer,read->readback.buffer,1,&copy);}
     unsigned bc_count=0;uint64_t bc_bytes=0;
-    for(int priority=2;priority>=0;priority--)for(probe_image *interest=probe_images;interest;interest=interest->next){if(interest->priority!=(unsigned)priority)continue;image_entry *image=graphics_probe_image(interest->serial);if(!image)continue;unsigned level=interest->mip;uint32_t full_w=dimension(image->texture.d.width,level),full_h=dimension(image->texture.d.height,level),full_d=image->texture.d.target==NVN_TEXTURE_TARGET_3D?dimension(image->texture.d.depth,level):1;int bw,bh,bpb=nvn_fmt_bpb(image->texture.d.format,&bw,&bh),compressed=bw==4&&bh==4;
+    for(int priority=2;priority>=0;priority--)for(probe_image *interest=probe_images;interest;interest=interest->next){if(interest->priority!=(unsigned)priority)continue;image_entry *image=graphics_probe_image(interest->serial);if(!image)continue;
+        // 无 BC 设备上 BC 图已解压成别的 VkFormat；探针按 NVN 块格式算的缓冲会越界，跳过（源 dump 已覆盖）。
+        // On BC-less devices the image is decoded to another VkFormat; the probe's NVN-block-sized buffer would overrun, so skip (the source dump covers it).
+        if(image->format!=vk_format(image->texture.d.format))continue;
+        unsigned level=interest->mip;uint32_t full_w=dimension(image->texture.d.width,level),full_h=dimension(image->texture.d.height,level),full_d=image->texture.d.target==NVN_TEXTURE_TARGET_3D?dimension(image->texture.d.depth,level):1;int bw,bh,bpb=nvn_fmt_bpb(image->texture.d.format,&bw,&bh),compressed=bw==4&&bh==4;
         if(bpb<=0||bpb>16||(!compressed&&(bw!=1||bh!=1))||level>=image->texture.d.levels||interest->layer>=image->texture.L.layers||(compressed&&(!priority||bc_count>=24)))continue;
         // Vulkan depth-plane copies use D16=2 / D24=4 / D32=4 bytes; combined stencil bytes are separate.
         int depth=!!(image->aspect&VK_IMAGE_ASPECT_DEPTH_BIT);if(depth)bpb=image->texture.d.format==NVN_FORMAT_DEPTH16?2:4;

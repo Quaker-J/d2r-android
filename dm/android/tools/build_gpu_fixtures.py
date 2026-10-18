@@ -28,7 +28,7 @@ def build(output):
         native=ROOT / "native"
         targets={
             "libdmgpudriverprobe.so": [ROOT / "tests/gpu_driver_properties.c",native / "gpu_driver.c"],
-            "libdmgputestprobe.so": [ROOT / "tests/vulkan_test.c",native / "legacy_digest.c",native / "pending_ranges.c",native / "gpu_driver.c",
+            "libdmgputestprobe.so": [ROOT / "tests/vulkan_test.c",native / "legacy_digest.c",native / "pending_ranges.c",native / "nvn_bcdec_vk.c",native / "gpu_driver.c",
                                     ROOT.parent / "gfx/nvn/nvn_tex.c",ROOT.parent / "gfx/tex/nvn_deswizzle.c"],
         }
         records=[]

@@ -256,7 +256,9 @@ def main():
     parser.add_argument("--dotnet", type=Path, default=Path.home() / "dm-work/tools/dotnet/dotnet")
     parser.add_argument("--prepare-only", action="store_true"); parser.add_argument("--jobs", type=int, default=4)
     parser.add_argument("--precision", choices=("full", "reduced"), default="full", help="GPU contraction policy; use separate output directories for each variant (default: full)")
-    parser.add_argument("--host-subgroup-size", type=int, choices=(32, 64, 128), default=32, help="Actual Vulkan subgroup size; preserve guest 32-lane warp semantics using Ryujinx adapters (default: 32)")
+    # 16 是 Mali-G720 系统驱动的物理档位（guest warp 仍是 32）；32/64/128 保留原有的 Adreno/Turnip 档位。
+    # 16 is the Mali-G720 system driver's physical size (guest warp remains 32); 32/64/128 keep the original Adreno/Turnip sizes.
+    parser.add_argument("--host-subgroup-size", type=int, choices=(16, 32, 64, 128), default=32, help="Actual Vulkan subgroup size; 16 for Mali system drivers, 32/64/128 preserve guest 32-lane warp semantics using Ryujinx adapters (default: 32)")
     parser.add_argument("--reuse-jobs", type=Path, help="Existing work/jobs.json; skip CASC/NSO extraction (romfs and main may be omitted)")
     parser.add_argument("--translator", type=Path, help="Reuse an existing Android dmsh_android.dll instead of building the translator")
     parser.add_argument("--postprocess-only", action="store_true", help="Repair required storage-image capability declarations in output/spirv without extraction/translation/reflection changes")

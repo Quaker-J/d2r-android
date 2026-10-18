@@ -5,6 +5,7 @@
 #include "../../gfx/nvn/nvn_mtl.h"
 #include "../../gfx/nvn/nvn_dirty.h"
 #include "../../gfx/tex/nvn_deswizzle.h"
+#include "nvn_astc_copy_spv.h"
 #include "host_posix.h"
 #include "legacy_digest.h"
 #include "debug_stats.h"
@@ -18,6 +19,7 @@
 static dm_vk_driver vk_api;
 #endif
 #include <vulkan/vulkan.h>
+#include "nvn_bcdec_vk.h"
 #include <stdatomic.h>
 #include <errno.h>
 #include <dlfcn.h>
@@ -120,6 +122,7 @@ static uint32_t used_queries;
 static uint64_t query_counts[1024];
 static VkPhysicalDeviceMemoryProperties memory_properties;
 static VkPhysicalDeviceFeatures gpu_features;
+static int gpu_texture_compression_bc, gpu_texture_compression_astc;
 static VkPhysicalDeviceLimits gpu_limits;
 static uint32_t gpu_subgroup_size;
 static VkSurfaceKHR surface;
@@ -364,6 +367,9 @@ driver_retry:;
     gpu_subgroup_size=vk_api.effective_shader_subgroup_size;
 #endif
     vkGetPhysicalDeviceFeatures(physical, &features); gpu_features = features;
+    gpu_texture_compression_bc = features.textureCompressionBC;
+    gpu_texture_compression_astc = features.textureCompressionASTC_LDR;
+    LOG("[vulkan] compressed texture support BC=%d ASTC=%d", gpu_texture_compression_bc, gpu_texture_compression_astc);
     vkGetPhysicalDeviceMemoryProperties(physical, &memory_properties);
     for(uint32_t i=0;i<memory_properties.memoryTypeCount;i++)LOG("[vulkan] memory type %u flags=%#x heap=%u",i,memory_properties.memoryTypes[i].propertyFlags,memory_properties.memoryTypes[i].heapIndex);
     LOG("Android NVN Vulkan: %s API %u.%u BC=%u ASTC=%u", properties.deviceName, VK_VERSION_MAJOR(properties.apiVersion), VK_VERSION_MINOR(properties.apiVersion), features.textureCompressionBC, features.textureCompressionASTC_LDR);
