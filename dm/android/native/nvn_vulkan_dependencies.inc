@@ -133,7 +133,7 @@ static int dependencies_shader_unknown(const shader_entry *shader) {
         const shader_binding *binding=&shader->bindings[i];
         const shader_binding_plan *plan=shader->binding_plan?&shader->binding_plan[i]:NULL;
         VkDescriptorType type=plan?plan->type:descriptor_type(binding);
-        if(type==VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER){
+        if(descriptor_type_uniform(type)){
             if(binding->kind==0||binding->slot<3||binding->slot>=19)continue;
             const p_bind_buf *u=&state.ubo[shader->stage][binding->slot-3];
             if(u->addr&&dependencies_unknown(u->addr,u->size<65536?u->size:65536))return DEP_UBO;

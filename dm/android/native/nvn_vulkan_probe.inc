@@ -216,12 +216,20 @@ static probe_cs_buffer *graphics_probe_cs_copy(unsigned id,unsigned binding,unsi
     after.buffer=read->readback.buffer;after.offset=0;after.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;after.dstAccessMask=VK_ACCESS_HOST_READ_BIT;vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,0,NULL,1,&after,0,NULL);
     snprintf(read->name,sizeof read->name,"cs-%u-%s-b%u-e%u.bin",id,phase,binding,element);fprintf(probe_trace,"Y\tcs-buffer\tdispatch=%u\tkey=%s\tphase=%s\tbinding=%u\telement=%u\ttype=%u\tformat=%u\twritable=%u\tbuffer=%#llx\toffset=%llu\trange=%llu\tfile=%s\n",id,probe_cs_key,phase,binding,element,type,format,writable,(unsigned long long)(uintptr_t)source.buffer,(unsigned long long)source.offset,(unsigned long long)source.range,read->name);read->next=probe_cs_buffers;probe_cs_buffers=read;return read;
 }
-static void graphics_probe_cs_inputs(const struct shader_entry *shader,const VkWriteDescriptorSet *writes,uint32_t count) {
+static void graphics_probe_cs_inputs(const struct shader_entry *shader,const VkWriteDescriptorSet *writes,uint32_t count,const uint32_t *dynamic_offsets,unsigned dynamic_count) {
     if(!graphics_probe_active()||!*probe_cs_key||shader->stage!=5||strcmp(shader->key,probe_cs_key)||probe_cs_count==2)return;
     if(probe_cs_pending.id)die("Vulkan CS probe inputs without previous dispatch");probe_cs_pending.id=++probe_cs_count;strcpy(probe_cs_pending.key,shader->key);probe_cs_pending.first=probe_cs_buffers;
     for(unsigned i=0;i<count;i++){const VkWriteDescriptorSet *write=&writes[i];unsigned writable=0;for(unsigned b=0;b<shader->count;b++)if(shader->bindings[b].binding==write->dstBinding){const shader_binding *binding=&shader->bindings[b];writable=binding->kind==2?(binding->flags&1):binding->kind==4?(binding->flags&4):0;break;}
         for(unsigned element=0;element<write->descriptorCount;element++){VkDescriptorBufferInfo source={0};VkFormat format=VK_FORMAT_UNDEFINED;
             if(write->descriptorType==VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER||write->descriptorType==VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)source=write->pBufferInfo[element];
+            // 动态 uniform 的位置不在描述符里；探针必须补上绑定时的偏移，否则记录的是块首而不是真实输入。
+            // A dynamic uniform's position is not in the descriptor; the probe must add the bound offset, or it would
+            // record the block start instead of the real input.
+            else if(write->descriptorType==VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC){
+                int dynamic_index=shader->binding_plan?shader->binding_plan[i].dynamic_index:-1;
+                if(dynamic_index<0||(unsigned)(dynamic_index+element)>=dynamic_count)die("Vulkan CS probe dynamic uniform offset");
+                source=write->pBufferInfo[element];source.offset+=dynamic_offsets[dynamic_index+element];
+            }
             else if(write->descriptorType==VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER||write->descriptorType==VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER){VkBufferView view=write->pTexelBufferView[element];texel_view_entry *found=NULL;for(unsigned bucket=0;bucket<1024&&!found;bucket++)for(texel_view_entry *entry=texel_view_cache[texel_view_slot][bucket];entry;entry=entry->next)if(entry->view==view){found=entry;break;}if(!found)die("Vulkan CS probe texel view backing unavailable");source=found->buffer;format=found->format;}
             else {fprintf(probe_trace,"Y\tcs-unsupported-descriptor\tdispatch=%u\tkey=%s\tbinding=%u\telement=%u\ttype=%u\n",probe_cs_pending.id,shader->key,write->dstBinding,element,write->descriptorType);continue;}
             graphics_probe_cs_copy(probe_cs_pending.id,write->dstBinding,element,write->descriptorType,source,format,writable,"pre");

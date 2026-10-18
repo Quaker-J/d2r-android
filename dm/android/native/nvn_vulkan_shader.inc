@@ -1,15 +1,15 @@
 // 预编译 SPIR-V、描述符绑定及计算提交。| Precompiled SPIR-V, descriptor binding and compute submission.
 typedef struct { uint32_t kind,binding,slot,cb_slot,cb_offset,handle,type,count,flags,separate; } shader_binding;
-typedef struct { VkDescriptorType type; uint32_t offset; int storage_slot,uniform_pointer; } shader_binding_plan;
+typedef struct { VkDescriptorType type; uint32_t offset; int storage_slot,uniform_pointer,dynamic_index; } shader_binding_plan;
 typedef struct shader_entry {
     char key[17]; uint32_t stage,set,count,c1_size,attributes[32];
     shader_binding *bindings; uint8_t *c1; VkShaderModule module; VkDescriptorSetLayout layout;
-    shader_binding_plan *binding_plan; uint32_t buffer_count,image_count,texel_count;
+    shader_binding_plan *binding_plan; uint32_t buffer_count,image_count,texel_count,dynamic_count;
     VkPipelineLayout compute_layout; VkPipeline compute_pipeline;
     vk_buffer constant_buffer;
     struct shader_entry *next;
 } shader_entry;
-static void graphics_probe_cs_inputs(const struct shader_entry *shader,const VkWriteDescriptorSet *writes,uint32_t count);
+static void graphics_probe_cs_inputs(const struct shader_entry *shader,const VkWriteDescriptorSet *writes,uint32_t count,const uint32_t *dynamic_offsets,unsigned dynamic_count);
 static void graphics_probe_cs_outputs(const struct shader_entry *shader);
 static shader_entry *shader_list;
 // 提交线程与预热线程共享着色器/通道/布局表；这把锁串行化表的增查，预热对象因此直接进入运行期缓存。
@@ -74,8 +74,27 @@ static void *read_shader_file_opt(const char *key,const char *suffix,size_t *siz
     char path[1024];snprintf(path,sizeof path,"%s/%s.%s",dir,key,suffix);FILE *f=fopen(path,"rb");if(!f)return NULL;
     if(fseek(f,0,SEEK_END)){fclose(f);return NULL;}long n=ftell(f);if(n<0||n>32*1024*1024){fclose(f);return NULL;}rewind(f);void *data=malloc(n?n:1);if(!data||fread(data,1,n,f)!=(size_t)n){free(data);fclose(f);return NULL;}fclose(f);*size=n;return data;
 }
+// 只有内容变化就换 arena 槽位的客体 UBO 用动态偏移；支持数据、c1 与 c0/c2 驱动表槽位跨绘制稳定。
+// Only guest UBOs that migrate arena slots as their contents change use dynamic offsets; the support
+// data, c1 and the c0/c2 driver table slots stay put across draws.
+// 客体 UBO 随内容变化，是换槽位最频繁的一档，动态偏移优先给它。
+// Guest UBOs change with content and move slots most often, so they get dynamic offsets first.
+static int descriptor_uniform_dynamic_guest(const shader_binding *b) {
+    return b->kind==1&&b->slot>=3&&b->slot<19;
+}
+// c0/c2 驱动表也由 arena 槽位承载，位置跨绘制同样会变；c1 与支持数据位置固定，不用动态偏移。
+// The c0/c2 driver tables also live in arena slots and move across draws; c1 and the support data keep fixed
+// positions and need no dynamic offset.
+static int descriptor_uniform_dynamic(const shader_binding *b) {
+    return b->kind==1&&(b->slot==0||b->slot==2||(b->slot>=3&&b->slot<19));
+}
+// 静态与动态 uniform 共用一条读取与依赖路径，区别只在描述符里的位置由谁提供。
+// Static and dynamic uniforms share one read and dependency path; only who supplies the descriptor position differs.
+static int descriptor_type_uniform(VkDescriptorType type) {
+    return type==VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER||type==VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+}
 static VkDescriptorType descriptor_type(const shader_binding *b) {
-    if(b->kind<=1)return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    if(b->kind<=1)return descriptor_uniform_dynamic(b)?VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     if(b->kind==2)return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     if(b->kind==4)return (b->type&255)==2?VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     if((b->type&255)==2)return VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
@@ -101,8 +120,8 @@ static shader_entry *shader_load_by_key(const char *key,int stats,int fatal) {
     if(s->count){s->binding_plan=calloc(s->count,sizeof *s->binding_plan);if(!s->binding_plan)die("Vulkan shader binding plan allocation");}
     VkDescriptorSetLayoutBinding bindings[256];for(unsigned i=0;i<s->count;i++){
         const shader_binding *b=&s->bindings[i];if(!b->count||b->count>128)die("Vulkan descriptor array capacity");
-        shader_binding_plan *p=&s->binding_plan[i];p->type=descriptor_type(b);
-        if(p->type==VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER||p->type==VK_DESCRIPTOR_TYPE_STORAGE_BUFFER){p->offset=s->buffer_count;s->buffer_count+=b->count;}
+        shader_binding_plan *p=&s->binding_plan[i];p->type=descriptor_type(b);p->dynamic_index=-1;
+        if(descriptor_type_uniform(p->type)||p->type==VK_DESCRIPTOR_TYPE_STORAGE_BUFFER){p->offset=s->buffer_count;s->buffer_count+=b->count;}
         else if(p->type==VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER||p->type==VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER){p->offset=s->texel_count;s->texel_count+=b->count;}
         else{p->offset=s->image_count;s->image_count+=b->count;}
         if(p->type==VK_DESCRIPTOR_TYPE_STORAGE_BUFFER){
@@ -112,9 +131,35 @@ static shader_entry *shader_load_by_key(const char *key,int stats,int fatal) {
         }
         bindings[i]=(VkDescriptorSetLayoutBinding){.binding=b->binding,.descriptorType=p->type,.descriptorCount=b->count,.stageFlags=VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT|VK_SHADER_STAGE_COMPUTE_BIT};
     }
+    // 动态 uniform 的条数必须落在设备上限内；超限就整批退回静态，不能带病创建布局。
+    // The dynamic uniform count must fit the device limit; if it does not, fall back to static for all of them
+    // instead of creating a layout the device would reject.
+    unsigned dynamic_limit=(unsigned)gpu_limits.maxDescriptorSetUniformBuffersDynamic,guest_candidates=0,driver_candidates=0;
+    for(unsigned i=0;i<s->count;i++)if(s->binding_plan[i].type==VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC){
+        if(descriptor_uniform_dynamic_guest(&s->bindings[i]))guest_candidates+=s->bindings[i].count;else driver_candidates+=s->bindings[i].count;}
+    // 两级回退：先退掉位置相对稳定的驱动表槽位，仍超限才整批退回静态。
+    // Two-tier fallback: drop the steadier driver-table slots first, and fall back to all-static only if still over.
+    if(guest_candidates+driver_candidates>dynamic_limit){
+        LOG("[vulkan] dynamic uniform fallback: shader=%s guest=%u driver=%u limit=%u",s->key,guest_candidates,driver_candidates,dynamic_limit);
+        for(unsigned i=0;i<s->count;i++)if(s->binding_plan[i].type==VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC&&!descriptor_uniform_dynamic_guest(&s->bindings[i])){s->binding_plan[i].type=VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;bindings[i].descriptorType=VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;}
+        if(guest_candidates>dynamic_limit)for(unsigned i=0;i<s->count;i++)if(s->binding_plan[i].type==VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC){s->binding_plan[i].type=VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;bindings[i].descriptorType=VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;}
+    }
+    // 动态偏移按 binding 号升序排位：Vulkan 要求这套数组的顺序与绑定的 binding 号一致，反射顺序不保证。
+    // Dynamic offsets are ranked by ascending binding number: Vulkan requires that array order to follow binding
+    // numbers, which reflection order does not guarantee.
+    for(unsigned i=0;i<s->count;i++){
+        unsigned best=s->count;
+        for(unsigned j=0;j<s->count;j++)if(s->binding_plan[j].dynamic_index<0&&s->binding_plan[j].type==VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC)
+            if(best==s->count||s->bindings[j].binding<s->bindings[best].binding)best=j;
+        if(best==s->count)break;
+        s->binding_plan[best].dynamic_index=(int)s->dynamic_count;s->dynamic_count+=s->bindings[best].count;
+    }
+    {unsigned dynamic_sum=0;
+     for(unsigned i=0;i<s->count;i++)if(s->binding_plan[i].type==VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC)dynamic_sum+=s->bindings[i].count;
+     if(s->dynamic_count!=dynamic_sum)die("Vulkan dynamic uniform placement: shader=%s placed=%u expected=%u",s->key,s->dynamic_count,dynamic_sum);}
     VkDescriptorSetLayoutCreateInfo li={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,.bindingCount=s->count,.pBindings=bindings};VK_CHECK(vkCreateDescriptorSetLayout(device,&li,NULL,&s->layout));s->next=shader_list;shader_list=s;
     pthread_mutex_unlock(&graphics_object_lock);
-    if(stats)resource_create_end(0,creation,s->key,NULL);LOG("[vulkan] shader %s stage=%u bindings=%u",s->key,s->stage,s->count);return s;
+    if(stats)resource_create_end(0,creation,s->key,NULL);LOG("[vulkan] shader %s stage=%u bindings=%u dynamic_uniforms=%u",s->key,s->stage,s->count,s->dynamic_count);return s;
 }
 // 运行期入口：控制块哈希出键，命中共享表或走致命加载；预热入口按清单键非致命加载。
 // Runtime entry: hash the control block to a key, then hit the shared table or load fatally; the warm entry loads non-fatally by manifest key.
@@ -165,27 +210,36 @@ static VkImageView descriptor_view(const texture_descriptor *descriptor,image_en
 }
 #include "nvn_vulkan_uniform.inc"
 #include "nvn_vulkan_binding_cache.inc"
-static VkDescriptorBufferInfo uniform_buffer(shader_entry *s,const shader_binding *b) {
+// arena 槽位承载的 uniform 把位置交给动态偏移；描述符只留块基址与范围，同一块内换槽位就不再改变描述符。
+// A uniform carried by an arena slot hands its position to the dynamic offset; the descriptor keeps only the block
+// base and the range, so moving slots inside one block no longer changes the descriptor.
+static VkDescriptorBufferInfo uniform_dynamic_split(const shader_binding *b,VkDescriptorBufferInfo info,uint32_t *dynamic_offset) {
+    if(!descriptor_uniform_dynamic(b))return info;
+    if(info.offset>(uint64_t)UINT32_MAX)die("Vulkan dynamic uniform offset range");
+    *dynamic_offset=(uint32_t)info.offset;info.offset=0;return info;
+}
+static VkDescriptorBufferInfo uniform_buffer(shader_entry *s,const shader_binding *b,uint32_t *dynamic_offset) {
+    *dynamic_offset=0;
     // 支持缓冲与每个着色器的 c1 始终不变，跨绘制共享，避免反复清零 64 KiB。
     // Support data and each shader's c1 are immutable; share across draws instead of repeatedly clearing 64 KiB.
     static vk_buffer support,zero;
     if(b->kind==0){if(!support.buffer){support=buffer_create(65536);memset(support.mapped,0,65536);for(int i=0;i<73;i++)*(float*)((uint8_t*)support.mapped+192+16*i)=1;immutable_buffer_bytes+=support.capacity;}return (VkDescriptorBufferInfo){support.buffer,0,65536};}
     if(b->slot==1){if(!s->constant_buffer.buffer){s->constant_buffer=buffer_create(65536);memset(s->constant_buffer.mapped,0,65536);memcpy(s->constant_buffer.mapped,s->c1,s->c1_size);immutable_buffer_bytes+=s->constant_buffer.capacity;}return (VkDescriptorBufferInfo){s->constant_buffer.buffer,0,65536};}
-    if(b->slot==0){VkDescriptorBufferInfo current;if(uniform_driver_current(s->stage,0,&current))return current;
+    if(b->slot==0){VkDescriptorBufferInfo current;if(uniform_driver_current(s->stage,0,&current))return uniform_dynamic_split(b,current,dynamic_offset);
         uint8_t data[0x610]={0};unsigned base=s->stage==0?0x110:s->stage==5?0x310:0x510;
         for(unsigned i=0;i<16;i++){memcpy(data+base+16*i,&state.ssbo[s->stage][i].addr,8);uint32_t size=state.ssbo[s->stage][i].size;memcpy(data+base+16*i+8,&size,4);}
         // 计算 c0 同时保存 0x210 的 UBO 地址表和 0x310 的 SSBO 地址表。
         // Compute c0 contains both the UBO address table at 0x210 and the SSBO table at 0x310.
         if(s->stage==5)for(unsigned i=0;i<16;i++){memcpy(data+0x210+16*i,&state.ubo[5][i].addr,8);uint32_t size=state.ubo[5][i].size;memcpy(data+0x210+16*i+8,&size,4);}
-        return uniform_driver(s->stage,0,data,base+256);}
-    if(b->slot==2){VkDescriptorBufferInfo current;if(uniform_driver_current(s->stage,1,&current))return current;
+        return uniform_dynamic_split(b,uniform_driver(s->stage,0,data,base+256),dynamic_offset);}
+    if(b->slot==2){VkDescriptorBufferInfo current;if(uniform_driver_current(s->stage,1,&current))return uniform_dynamic_split(b,current,dynamic_offset);
         uint8_t data[0x968]={0};for(unsigned i=0;i<128;i++){uint32_t tex=state.textures[s->stage][i],samp=state.samplers[s->stage][i];memcpy(data+0x168+8*i,&tex,4);memcpy(data+0x568+8*i,&samp,4);}for(unsigned i=0;i<8;i++){uint32_t image=state.images[s->stage][i];memcpy(data+0x120+8*i,&image,4);}
-        return uniform_driver(s->stage,1,data,sizeof data);}
+        return uniform_dynamic_split(b,uniform_driver(s->stage,1,data,sizeof data),dynamic_offset);}
     if(b->slot>=3&&b->slot<19){const p_bind_buf *u=&state.ubo[s->stage][b->slot-3];uint32_t n=u->addr&&u->size?(u->size<65536?u->size:65536):0;
         // 未绑定 uniform 的完整范围同为零，可共享一个不可变页，不占每 draw 的 arena 空间。
         // Unbound uniforms have the same all-zero range, so share an immutable page without per-draw arena space.
         if(!n){if(!zero.buffer){zero=buffer_create(65536);memset(zero.mapped,0,65536);immutable_buffer_bytes+=zero.capacity;}return (VkDescriptorBufferInfo){zero.buffer,0,65536};}
-        return uniform_read_cached(u->addr,n);}
+        return uniform_dynamic_split(b,uniform_read_cached(u->addr,n),dynamic_offset);}
     die("Unsupported Vulkan constant slot %u",b->slot);
 }
 typedef struct descriptor_chunk { VkDescriptorPool pool; struct descriptor_chunk *next; } descriptor_chunk;
@@ -197,8 +251,10 @@ static void descriptor_reset(void) {
 }
 static descriptor_chunk *descriptor_chunk_new(void) {
     descriptor_chunk *c=calloc(1,sizeof *c);if(!c)die("Vulkan descriptor chunk allocation");
-    VkDescriptorPoolSize sizes[8];for(unsigned i=0;i<8;i++)sizes[i]=(VkDescriptorPoolSize){i,4096};
-    VkDescriptorPoolCreateInfo pi={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,.maxSets=256,.poolSizeCount=8,.pPoolSizes=sizes};VK_CHECK(vkCreateDescriptorPool(device,&pi,NULL,&c->pool));return c;
+    // 池必须覆盖用到的每个描述符类型；动态 uniform 是类型 8，只列 0-7 会让分配失败。
+    // The pool must cover every descriptor type in use; dynamic uniform is type 8, so listing only 0-7 makes allocation fail.
+    VkDescriptorPoolSize sizes[10];for(unsigned i=0;i<10;i++)sizes[i]=(VkDescriptorPoolSize){i,4096};
+    VkDescriptorPoolCreateInfo pi={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,.maxSets=256,.poolSizeCount=10,.pPoolSizes=sizes};VK_CHECK(vkCreateDescriptorPool(device,&pi,NULL,&c->pool));return c;
 }
 static VkDescriptorSet descriptor_allocate(VkDescriptorSetLayout layout) {
     if(!descriptor_current){descriptor_chunks=descriptor_chunk_new();descriptor_current=descriptor_chunks;}
@@ -229,18 +285,25 @@ static VkPipelineStageFlags shader_pipeline_stage(const shader_entry *s) {
 }
 #include "nvn_vulkan_forward_bind.inc"
 #include "nvn_vulkan_texel.inc"
-static VkDescriptorSet bind_shader(shader_entry *s,post_op *lifetime) {
+static VkDescriptorSet bind_shader(shader_entry *s,post_op *lifetime,uint32_t *dynamic_offsets,unsigned *dynamic_count) {
     (void)lifetime;descriptor_reserve(s);
+    unsigned dynamic_base=*dynamic_count;
+    // 两个集合的动态偏移必须连续排在一套数组里：先第一个集合的全部偏移，再第二个集合的全部偏移。
+    // Both sets' dynamic offsets must be contiguous in one array: every offset of the first set, then the second's.
+    if(dynamic_base+s->dynamic_count>256)die("Vulkan dynamic uniform offset capacity: shader=%s base=%u count=%u",s->key,dynamic_base,s->dynamic_count);
+    *dynamic_count=dynamic_base+s->dynamic_count;
     VkWriteDescriptorSet writes[256];
+    uint64_t res_phase=dm_cpu_phase_begin();
     for(unsigned i=0;i<s->count;i++){
         const shader_binding *b=&s->bindings[i];const shader_binding_plan *plan=&s->binding_plan[i];VkDescriptorType type=plan->type;VkDescriptorBufferInfo *buffers=NULL;VkDescriptorImageInfo *images=NULL;VkBufferView *texel_views=NULL;
-        if(type==VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER||type==VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)buffers=descriptor_workspace.buffers+plan->offset;
+        if(descriptor_type_uniform(type)||type==VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)buffers=descriptor_workspace.buffers+plan->offset;
         else if(type==VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER||type==VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)texel_views=descriptor_workspace.texels+plan->offset;
         else images=descriptor_workspace.images+plan->offset;
         VkWriteDescriptorSet w={.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,.dstBinding=b->binding,.descriptorCount=b->count,.descriptorType=type,.pBufferInfo=buffers,.pImageInfo=images,.pTexelBufferView=texel_views};
-        VkDescriptorBufferInfo uniform={0};if(type==VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)uniform=uniform_buffer(s,b);
+        VkDescriptorBufferInfo uniform={0};uint32_t uniform_offset=0;
+        if(descriptor_type_uniform(type)){uniform=uniform_buffer(s,b,&uniform_offset);if(plan->dynamic_index>=0)for(unsigned j=0;j<b->count;j++)dynamic_offsets[dynamic_base+plan->dynamic_index+j]=uniform_offset;}
         for(unsigned j=0;j<b->count;j++){
-            if(type==VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)buffers[j]=uniform;
+            if(descriptor_type_uniform(type))buffers[j]=uniform;
             else if(type==VK_DESCRIPTOR_TYPE_STORAGE_BUFFER){
                 int uniform_ptr=plan->uniform_pointer,slot=plan->storage_slot;
                 const p_bind_buf *u=uniform_ptr?&state.ubo[s->stage][slot]:&state.ssbo[s->stage][slot];uint64_t bytes=u->size?u->size:65536;vk_buffer buffer;
@@ -263,7 +326,12 @@ static VkDescriptorSet bind_shader(shader_entry *s,post_op *lifetime) {
             else {
                 uint32_t handle=shader_handle(b,s->stage,j);
                 images[j]=(VkDescriptorImageInfo){.sampler=sampler_get_for_type((handle>>20)&0xfff,type==VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER?b->type:0),.imageLayout=VK_IMAGE_LAYOUT_GENERAL};
-                if(type!=VK_DESCRIPTOR_TYPE_SAMPLER){texture_descriptor descriptor=descriptor_texture(handle&0xfffff);VkAccessFlags access=VK_ACCESS_SHADER_READ_BIT;
+                if(type!=VK_DESCRIPTOR_TYPE_SAMPLER){texture_descriptor descriptor=descriptor_texture(handle&0xfffff);
+                    // 只读计数：游戏绑了句柄、端口却查不到登记，就会退回 1x1 替身贴图，整个四边形采到同一个颜色。
+                    // Read-only counter: the game bound a handle the port cannot resolve, which falls back to a 1x1
+                    // stand-in texture; the whole quad then samples one colour.
+                    if(handle&&!descriptor.valid){gpu_unregistered_textures++;if(gpu_unregistered_textures<=10||!(gpu_unregistered_textures%256))LOG("[vulkan-unregistered-tex] 绑定了未登记的贴图 id=%u handle=%#x shader=%s slot=%d（退回 1x1 替身）",handle&0xfffff,handle,s->key,b->binding);}
+                    VkAccessFlags access=VK_ACCESS_SHADER_READ_BIT;
                     // ImageStore 是位 2；保守保留读取权限，反射未单独标注 imageLoad。
                     // ImageStore is bit 2; conservatively retain reads because reflection does not separately flag imageLoad.
                     if(b->kind==4&&(b->flags&4))access|=VK_ACCESS_SHADER_WRITE_BIT;
@@ -273,12 +341,16 @@ static VkDescriptorSet bind_shader(shader_entry *s,post_op *lifetime) {
         }
         writes[i]=w;
     }
+    dm_cpu_phase_end(DM_CPU_PHASE_RESOLVE,res_phase);
     // 仍逐次执行上传/访问风险处理，再比较真实 payload；命中不能跳过 GPU 同步。
     // Perform uploads/access hazard handling on every call before comparing actual payloads; hits never skip GPU synchronization.
-    graphics_probe_cs_inputs(s,writes,s->count);
-    VkDescriptorSet set=descriptor_cache_find(s->layout,writes,s->count);if(set)return set;
+    graphics_probe_cs_inputs(s,writes,s->count,dynamic_offsets+dynamic_base,s->dynamic_count);
+    uint64_t descset_phase=dm_cpu_phase_begin();
+    VkDescriptorSet set=descriptor_cache_find(s->layout,writes,s->count);
+    if(set){dm_cpu_phase_end(DM_CPU_PHASE_DESCSET,descset_phase);return set;}
     set=descriptor_allocate(s->layout);for(unsigned i=0;i<s->count;i++)writes[i].dstSet=set;
     if(s->count)vkUpdateDescriptorSets(device,s->count,writes,0,NULL);descriptor_cache_store(s->layout,set);
+    dm_cpu_phase_end(DM_CPU_PHASE_DESCSET,descset_phase);
     return set;
 }
 #include "nvn_vulkan_dependencies.inc"
@@ -299,8 +371,9 @@ static void dispatch_compute(const p_dispatch *d) {
 #endif
         VK_CHECK(pipeline_create_compute(&ci,&s->compute_pipeline));resource_create_end(2,creation,s->key,NULL);}
     post_op *const *output_scope=post_copy_tail;forward_scope_marker=output_scope;
-    VkDescriptorSet set=bind_shader(s,NULL);
-    vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_COMPUTE,s->compute_pipeline);vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_COMPUTE,s->compute_layout,0,1,&set,0,NULL);graphics_probe_dispatch(d);vkCmdDispatch(command,d->x,d->y,d->z);gpu_snapshot_consumer_encoded();forward_record_outputs(output_scope,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    uint32_t dynamic_offsets[256];unsigned dynamic_count=0;
+    VkDescriptorSet set=bind_shader(s,NULL,dynamic_offsets,&dynamic_count);
+    vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_COMPUTE,s->compute_pipeline);vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_COMPUTE,s->compute_layout,0,1,&set,dynamic_count,dynamic_offsets);graphics_probe_dispatch(d);vkCmdDispatch(command,d->x,d->y,d->z);gpu_snapshot_consumer_encoded();forward_record_outputs(output_scope,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     graphics_probe_cs_outputs(s);
     // 图像消费者由 image_access 精确同步；仅真实缓冲写回需要主机可见性屏障。
     // image_access synchronizes image consumers precisely; only actual buffer writebacks need host visibility.

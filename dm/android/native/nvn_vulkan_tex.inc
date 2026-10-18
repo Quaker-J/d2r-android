@@ -4,7 +4,7 @@ typedef struct image_entry {
     uint64_t serial; tex_t texture; VkImage image; VkImageView view; VkDeviceMemory memory;
     VkFormat format; VkImageAspectFlags aspect; uint64_t stamp; int populated;
     uint64_t source_stamp,source_hash,source_seen;int source_valid,source_tracked;
-    VkPipelineStageFlags last_stage;VkAccessFlags last_access;
+    VkPipelineStageFlags last_stage;VkAccessFlags last_access;int gpu_written;
     cached_image_view *views;
     struct image_entry *next,*hash_next;
 } image_entry;
@@ -109,8 +109,15 @@ static void image_gpu_written(image_entry *e) {
     // 已存在的基线代表真正读过的 CPU 版本，重复 GPU 标记不能吞掉尚未读的 CPU 脏写。
     // Existing baselines represent CPU versions actually read; repeated GPU marking cannot consume unread CPU changes.
     if(t->has_layout&&t->mem&&!e->source_valid){nvn_dirty_protect(t->mem,t->L.size);image_source_baseline(e,t->mem,nvn_dirty_now());}
-    e->populated=1;e->stamp=0;
+    e->populated=1;e->stamp=0;e->gpu_written=1;
 }
+// 只读计数：GPU 渲染过的贴图又被整张从客体内存上传回去，等于用旧字节覆盖刚渲染出来的内容。
+// Read-only counter: an image the GPU rendered is uploaded whole from guest memory again, overwriting freshly
+// rendered content with older bytes.
+static uint64_t image_gpu_overwrites;
+// 游戏绑定了句柄、端口却查不到登记的采样贴图次数（会退回 1x1 替身贴图）。
+// How often the game bound a handle whose sampled texture the port cannot resolve (falls back to the 1x1 stand-in).
+static uint64_t gpu_unregistered_textures;
 static void image_upload(image_entry *e) {
     const tex_t *t=&e->texture;
     int pending=t->mem && snapshot_pending((uintptr_t)t->mem,t->L.size);
@@ -143,6 +150,7 @@ static void image_upload(image_entry *e) {
         VkBufferImageCopy r={.imageSubresource={e->aspect,level,layer,1},.imageExtent={w,h,d}};
         vkCmdCopyBufferToImage(command,p->source.buffer,e->image,VK_IMAGE_LAYOUT_GENERAL,1,&r);
     }
+    if(e->gpu_written){image_gpu_overwrites++;if(image_gpu_overwrites<=6||!(image_gpu_overwrites%64))LOG("[vulkan-upload] 覆盖 GPU 已渲染内容 serial=%llu %ux%u format=%#x bytes=%llu 第 %llu 次（客体内存里没有 GPU 那次渲染的结果）",(unsigned long long)t->serial,t->d.width,t->d.height,t->d.format,(unsigned long long)t->L.size,(unsigned long long)image_gpu_overwrites);}
     image_source_baseline(e,storage,stamp);free(shadow);e->populated=1;e->stamp=stamp;texture_uploads++;
 }
 static VkImageSubresourceRange texture_range(image_entry *e,const view_t *v) {

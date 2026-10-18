@@ -229,3 +229,15 @@ port默认DM_OPMODE=1 Console/Boost，front_game_res(1)=1600×900，最新营地
 后续最窄locals、标准single-block、fullSSA三份独立合法候选已实际System/T30执行：T30三份全buffer与Host一致；System前两份仍44/53B差异，fullSSA10/36B差异且仍31格分类/子集违规，未构成修复。原cache和生产译器保持，研究输出在 `cs-light-bin-replay/reduction/`。
 
 最新reader/dirty正常APK营地真实稳态21.493FPS/GPU15.943ms，frame900混加载明确剔除。实际1308次/24.66MiB读取约14.2ms，MP约1004次/all-thread wall7ms，分别口径不能相加为内核总量；优先优化CPU读取，继续与原图形同步/内容失效保持一致。当前尺寸桶APK probe0关闭，strict T3064；独立映射基准仍是研究组件，不进入game流程。未达60FPS。
+
+## 内置 Turnip 与启动界面切换（2026-10-18）
+
+**实测结论：人物周边"硬边方块状光照"是驱动侧差异。** 同一存档、同一位置、同一份源码：系统自带的 Qualcomm Adreno 驱动（`driver_id=8`）会出现成块的亮度不一致（人物附近最明显，逐帧跳变，看着像在闪）；换成 Turnip 后画面平滑正常，帧率同为 60 上下（`[vulkan-frame-stability]` 帧间隔 p50 16.65 ms、无超 33 ms 帧）。
+
+**光照的实际载体**（由真机探针抓出，非推测）：游戏把光照算进一张 **32×8×32 的 RGBA16F 三维贴图**（计算着色器以存储图像写入，片元着色器每帧采样约 1882 次，采样器是**线性过滤**）。可见范围内正好约 32 个格子 ≈ 实测的 106 屏幕像素方块 —— 方块尺寸与这张贴图的格子完全对上。同一份着色器与数据在 Turnip 上正常，所以问题在驱动对这张三维存储图像的处理，不在移植的读数、上传或过滤。
+
+**随包分发**：驱动放在 `dm/android/prebuilt/turnip/`（`vulkan.purple.so` + 上游 `meta.json`），构建时由 `build.py --turnip`（默认路径即仓库内那份）打进 `assets/turnip/`；`--no-turnip` 出不含驱动的通用包，启动界面里那一项会自动隐藏。来源与许可见 README 的「依赖与来源」。
+
+**启动界面切换**：新增「驱动：系统驱动 / 内置 Turnip」一行。选择记在启动界面自己的 `launcher-state.conf`（`launch-settings.conf` 由 native 严格白名单解析，塞不进新键）。点「启动游戏」时：选内置驱动就把 `assets/turnip/vulkan.purple.so` 复制到应用内部 `files/temp/driver/`，再写 `files/temp/gpu-driver.conf`（`directory` / `library=vulkan.purple.so` / `require_custom=0` / `subgroup_size=<数据包里的档位值>`）；选系统驱动就把该配置删掉。**子组尺寸必须照抄数据包的 `shaders/host-subgroup-size.txt`（本机为 64）** —— T30 物理默认是 128，而游戏的着色器按 64 构建，端口会用实际选中的尺寸逐项校验这张档位表，不一致直接拒绝启动而不是悄悄画错。`require_custom=0` 是故意的：驱动万一加载失败，端口退回系统驱动并在日志写明 `requested=Turnip selected=system`，不会让游戏起不来。
+
+真机验证（2026-10-18）：界面切换 → 点启动 → `[vulkan-loader] requested=Turnip selected=Turnip identity verified`（`PurpleVK 26.3.0-devel`、`shader host subgroup=64 matches`）；切回系统驱动 → 配置被删除 → `driver configuration not found` → `requested=system selected=system`。

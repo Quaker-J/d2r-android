@@ -83,7 +83,11 @@ static VkResult graphics_pipeline_create(const pipeline_key *key,shader_entry *v
 // 真实创建才记录（缓存命中不写）；清单在 nvn_vulkan_warm.inc。
 // Record genuine creations only (cache hits write nothing); the manifest lives in nvn_vulkan_warm.inc.
 static void pso_record_graphics(const shader_entry *vs,const shader_entry *fs,const graphics_pass_key *pass,const pipeline_key *key);
+static void draw_graphics_inner(const p_draw *draw,const p_draw_idx *indexed);
 static void draw_graphics(const p_draw *draw,const p_draw_idx *indexed) {
+    uint64_t phase=dm_cpu_phase_begin();draw_graphics_inner(draw,indexed);dm_cpu_phase_end(DM_CPU_PHASE_DRAW,phase);
+}
+static void draw_graphics_inner(const p_draw *draw,const p_draw_idx *indexed) {
     // 零顶点/零实例的 NVN 绘制不访问索引和资源，也不增加遮挡样本。
     // NVN draws with zero vertices/instances access no indices/resources and add no occlusion samples.
     if ((draw && draw->count <= 0) || (indexed && (indexed->count <= 0 || !indexed->instances))) return;
@@ -91,13 +95,22 @@ static void draw_graphics(const p_draw *draw,const p_draw_idx *indexed) {
     if(!state.program||(!state.rt.n&&!state.rt.depth))die("Vulkan draw without program/targets");shader_entry *vs=NULL,*fs=NULL;
     for(unsigned i=0;i<state.program->nstage;i++){shader_entry *s=program_shader(state.program,i);if(s->stage==0)vs=s;else if(s->stage==1)fs=s;else die("Vulkan graphics stage %u pending",s->stage);}
     if(!vs)die("Vulkan draw missing vertex stage");
-    dependencies_prepare_draw(vs,fs,draw,indexed);
+    {uint64_t phase=dm_cpu_phase_begin();dependencies_prepare_draw(vs,fs,draw,indexed);dm_cpu_phase_end(DM_CPU_PHASE_DEPENDENCY,phase);}
     // 只在已有通道自然结束后提前提交；绑定和资源版本获取尚未开始。
     // Submit early only after the previous pass naturally ended, before binding or acquiring resource versions.
     if(!graphics_active_frame)async_chunk_boundary_locked();
     if(!fs)fs=graphics_empty_shader();
     post_op *const *output_scope=post_copy_tail;forward_scope_marker=output_scope;
-    VkDescriptorSet sets[2]={bind_shader(vs,NULL),bind_shader(fs,NULL)};VkPipelineLayout layout=graphics_layout_get(vs,fs);
+    // 初始化列表的求值顺序在 C 里未定义；第二个集合的动态偏移接在第一个之后，必须按序调用。
+    // Initializer-list evaluation order is unspecified in C; the second set's dynamic offsets follow the first,
+    // so the two binds must be ordered statements.
+    uint32_t dynamic_offsets[256];unsigned dynamic_count=0;
+    uint64_t bind_phase=dm_cpu_phase_begin();
+    VkDescriptorSet sets[2];
+    sets[0]=bind_shader(vs,NULL,dynamic_offsets,&dynamic_count);
+    sets[1]=bind_shader(fs,NULL,dynamic_offsets,&dynamic_count);
+    dm_cpu_phase_end(DM_CPU_PHASE_BIND,bind_phase);
+    uint64_t layout_phase=dm_cpu_phase_begin();VkPipelineLayout layout=graphics_layout_get(vs,fs);dm_cpu_phase_end(DM_CPU_PHASE_LAYOUT,layout_phase);
     VkImageView views[9]={0};image_entry *images[9]={0};VkAttachmentDescription attachments[9]={0};VkAttachmentReference colors[8]={0},depth={VK_ATTACHMENT_UNUSED,VK_IMAGE_LAYOUT_GENERAL};unsigned na=0;uint32_t width=UINT32_MAX,height=UINT32_MAX;
     for(int i=0;i<state.rt.n;i++){
         colors[i]=(VkAttachmentReference){VK_ATTACHMENT_UNUSED,VK_IMAGE_LAYOUT_GENERAL};if(!state.rt.color[i])continue;image_entry *e=image_get(state.rt.color[i]);const view_t *v=state.rt.has_cview[i]?&state.rt.cview[i]:NULL;VkImageSubresourceRange range=texture_range(e,v);uint32_t w=dimension(e->texture.d.width,range.baseMipLevel),h=dimension(e->texture.d.height,range.baseMipLevel);if(w<width)width=w;if(h<height)height=h;
@@ -162,7 +175,7 @@ static void draw_graphics(const p_draw *draw,const p_draw_idx *indexed) {
         pso_record_graphics(vs,fs,&frame->key.pass->key,&key);}else pipeline_reuses++;
     graphics_last_pipeline=cached;
     graphics_pass_begin(frame);
-    graphics_command_apply(cached->pipeline,layout,sets,&viewport,&scissor,state.blend_color.rgba,state.polygon_offset.units,state.polygon_offset.factor,state.stencil_faces);
+    graphics_command_apply(cached->pipeline,layout,sets,dynamic_offsets,dynamic_count,&viewport,&scissor,state.blend_color.rgba,state.polygon_offset.units,state.polygon_offset.factor,state.stencil_faces);
     for(unsigned i=0;i<16;i++)if(vertex_buffers[i])graphics_command_vertices(i,vertex_buffers[i],offsets[i]);
     graphics_probe_draw(draw,indexed);
     if(indexed){graphics_command_index(index_buffer,0,index_type);vkCmdDrawIndexed(command,indexed->count,indexed->instances,0,indexed->base_vertex,indexed->base_instance);}else vkCmdDraw(command,draw->count,1,draw->first,0);

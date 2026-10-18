@@ -20,12 +20,19 @@ GAME_ACTIVITY = "org.d2r.android.port.D2RActivity"
 LAUNCHER_NAME = "org.d2r.android.port.LauncherActivity"
 # 正式构建把仓库清单里的单个 NativeActivity 换成这两条：启动界面当入口，游戏本体降级成它启动的第二个页面。
 # 探针构建走不到这里：它没有 dex，清单里不能出现 Java 页面。
+# 两个页面都用 sensorLandscape（与仓库清单一致，见 AndroidManifest.xml）：只支援两个横向，但画面随设备保持在正向；
+# 用 landscape 会被钉在一个横向朝向上，转到另一个横向就倒过来。configChanges 已含 orientation|screenSize，
+# 旋转不重建活动，游戏进程与这一局都保留。
 # The release build swaps the repository manifest's single NativeActivity for these two: the launcher is the
 # entry point and the game becomes the second page it starts. The probe build never reaches this branch —
 # it has no dex, so its manifest must not declare a Java activity.
+# Both pages use sensorLandscape (kept in step with the repository manifest, see AndroidManifest.xml): only the two
+# landscapes are allowed, but the picture stays upright as the device turns; plain landscape would pin a single
+# landscape orientation and go upside down when the device is turned the other way. configChanges already lists
+# orientation|screenSize, so a rotation does not recreate the activity and the game process and the run both survive.
 LAUNCHER_ACTIVITY_BLOCK = (
     '<activity android:name="' + LAUNCHER_NAME + '" android:exported="true"'
-    ' android:screenOrientation="landscape" android:configChanges="orientation|screenSize|keyboardHidden"'
+    ' android:screenOrientation="sensorLandscape" android:configChanges="orientation|screenSize|keyboardHidden"'
     ' android:theme="@android:style/Theme.Material.NoActionBar">\n'
     '            <intent-filter>\n'
     '                <action android:name="android.intent.action.MAIN" />\n'
@@ -35,7 +42,7 @@ LAUNCHER_ACTIVITY_BLOCK = (
     '        ')
 GAME_ACTIVITY_BLOCK = (
     '<activity android:name="' + GAME_ACTIVITY + '" android:exported="false"'
-    ' android:screenOrientation="landscape" android:configChanges="orientation|screenSize|keyboardHidden"'
+    ' android:screenOrientation="sensorLandscape" android:configChanges="orientation|screenSize|keyboardHidden"'
     ' android:theme="@android:style/Theme.Material.NoActionBar">\n'
     '            <meta-data android:name="android.app.lib_name" android:value="dmandroid" />\n'
     '        </activity>')
@@ -97,6 +104,10 @@ def main():
     parser.add_argument("--shader-cache", type=Path, default=Path.home() / "dm-work/build/android/shaders/spirv")
     parser.add_argument("--version", default="dev",
                         help="写进 APK 的版本：发布用 tag 名（v0.3），分支构建用 main-<短提交>；默认 dev")
+    parser.add_argument("--turnip", type=Path, default=ROOT / "prebuilt/turnip/vulkan.purple.so",
+                        help="随 APK 分发的 Turnip 驱动；默认用仓库里的 dm/android/prebuilt/turnip/")
+    parser.add_argument("--no-turnip", action="store_true",
+                        help="不出内置驱动（只出通用包，启动界面里那一项会自己隐藏）")
     args = parser.parse_args()
     if args.game_source and not args.game_run: parser.error("--game-source only makes sense with --game-run")
     if args.game_run and not args.game_source:
@@ -169,6 +180,20 @@ def main():
         shutil.copyfile(artwork, assets / artwork.name)
     for override in sorted((ROOT / "local").glob("launcher-background.*")):
         shutil.copyfile(override, assets / override.name)
+    # 内置 Turnip 驱动随 APK 分发（Mesa 的 MIT 许可，构建者见 prebuilt/turnip/meta.json）：启动界面把它复制到
+    # 应用内部目录再按 gpu-driver.conf 选择，游戏本身不改一行代码；玩家可在启动界面切回系统驱动。
+    # 没有这个文件时照常出通用包，启动界面里那一项自动隐藏 —— 缺驱动不是构建失败。
+    # The built-in Turnip driver ships inside the APK (Mesa's MIT licence; builder recorded in
+    # prebuilt/turnip/meta.json): the launcher copies it into the app's internal storage and selects it through
+    # gpu-driver.conf, so the game code is untouched and the player can switch back to the system driver. Without
+    # the file a generic package is produced as before and that launcher row hides itself -- a missing driver is
+    # not a build failure.
+    if args.no_turnip: print("Turnip driver: excluded (--no-turnip)", flush=True)
+    elif args.turnip.is_file():
+        (assets / "turnip").mkdir(exist_ok=True)
+        shutil.copyfile(args.turnip, assets / "turnip/vulkan.purple.so")
+        print("Turnip driver: bundled from " + str(args.turnip) + " (%.1f MB)" % (args.turnip.stat().st_size / 1048576), flush=True)
+    else: print("Turnip driver: not present at " + str(args.turnip) + "; generic package only", flush=True)
     # 诊断GLSL缓存独立于游戏的离线Maxwell fullshader缓存，不覆盖游戏资源。
     # Keep diagnostic GLSL shaders separate from the game's offline Maxwell fullshader cache.
     shutil.copytree(build / "gpu-test-shaders", assets / "gpu-test-shaders", dirs_exist_ok=True)

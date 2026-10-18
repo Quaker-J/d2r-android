@@ -64,9 +64,11 @@ public final class LauncherActivity extends Activity {
     private static final int WARNING = 0xffd08a78;
 
     private Switch overlaySwitch;
-    private TextView profileItem, resolutionItem, importItem, statusView, startItem;
+    private TextView profileItem, resolutionItem, driverItem, importItem, statusView, startItem;
     private boolean handheld;
     private int resolutionIndex;
+    private int driverIndex;
+    private String packageSummary = "";
     private boolean importing;
     private volatile boolean cancelImport;
     // 出图分辨率只提供几档预设：它是"主机档"尺寸，掌机档由 native 按 0.8 同比例缩放（与 Mac/iOS 同一语义）。
@@ -75,6 +77,11 @@ public final class LauncherActivity extends Activity {
     // scaled by 0.8 inside native code, the same semantics as Mac and iOS. An empty string means "follow the
     // profile", which writes no key and keeps the original 16:9 constants.
     private static final String[] RESOLUTION_PRESETS = {"", "1920x1080", "2560x1440"};
+    // 图形驱动两档：系统自带的 Adreno 驱动，和随 APK 一起发的 Turnip（选它由 native 的 gpu-driver.conf 生效）。
+    // Measured difference: the Adreno driver shows blocky lighting around the player, Turnip does not — see the
+    // driver notes under docs/.
+    private static final String[] DRIVER_STATES = {"system", "turnip"};
+    private static final String TURNIP_ASSET = "turnip/vulkan.purple.so";
 
     private String text(String key) {
         int resource = getResources().getIdentifier(key, "string", getPackageName());
@@ -179,10 +186,92 @@ public final class LauncherActivity extends Activity {
         return text("dmAndroidLaunchResolution") + "：" + parts[0] + "×" + parts[1];
     }
 
+    // 内置 Turnip 是构建时打进 assets 的（build.py --turnip / dm/android/prebuilt/turnip）。
+    // APK 里没有它就把这一行整行藏起来 —— 不让玩家选一个根本装不出来的东西；系统驱动始终可用。
+    // The built-in Turnip is packed into assets at build time (build.py --turnip / dm/android/prebuilt/turnip).
+    // Without it the row hides entirely, so nobody can pick something that cannot work; the system driver is
+    // always available.
+    private boolean turnipBundled() {
+        try (InputStream stream = getAssets().open(TURNIP_ASSET)) {
+            return stream != null;
+        } catch (IOException error) {
+            return false;
+        }
+    }
+
+    private String driverLabel() {
+        return text("dmAndroidLaunchDriver") + "：" + text(
+                DRIVER_STATES[driverIndex].equals("turnip") ? "dmAndroidLaunchDriverTurnip" : "dmAndroidLaunchDriverSystem");
+    }
+
+    // 数据包里那张子组档位表（一行裸数字，不是 key=value）。端口会用驱动实际选中的子组尺寸逐项校验它，
+    // 不一致就拒绝启动 —— 所以配置里的 subgroup_size 必须照抄这里，不能自己猜。
+    // The package's subgroup profile (a bare number, not key=value). The port validates it against the size the
+    // driver actually selected and refuses to start on a mismatch, so subgroup_size has to be copied from here
+    // rather than guessed.
+    private String readProfileSize() {
+        File profile = new File(packageDirectory(), "shaders/host-subgroup-size.txt");
+        try (InputStream stream = new FileInputStream(profile)) {
+            byte[] text = new byte[16];
+            int count = stream.read(text);
+            if (count <= 0) return null;
+            String value = new String(text, 0, count, StandardCharsets.UTF_8).trim();
+            return value.isEmpty() ? null : value;
+        } catch (IOException error) {
+            return null;
+        }
+    }
+
+    // 驱动选择通过应用内部目录里的 gpu-driver.conf 生效（native 的 gpu_driver.c 读它，不需要任何环境变量）：
+    // 选内置驱动就把 assets 里的 .so 放到内部可执行目录再写这份配置，选系统驱动就把配置删掉。
+    // require_custom 留 0：驱动万一在这台机器上加载失败，端口会退回系统驱动并在日志里写明
+    // （requested=Turnip selected=system），不会让游戏直接起不来。
+    // The choice takes effect through gpu-driver.conf in the app's internal directory, which native's
+    // gpu_driver.c reads without any environment variable: the built-in driver copies its .so into internal
+    // executable storage and writes that file, while the system driver deletes it. require_custom stays 0 so that
+    // a driver which fails to load falls back to the system one with the log saying so
+    // (requested=Turnip selected=system) instead of refusing to start the game.
+    private String prepareDriver() {
+        File temporary = new File(getFilesDir(), "temp");
+        File configuration = new File(temporary, "gpu-driver.conf");
+        if (!DRIVER_STATES[driverIndex].equals("turnip")) {
+            configuration.delete();
+            return null;
+        }
+        String profile = readProfileSize();
+        if (profile == null) return "host-subgroup-size.txt";
+        File directory = new File(temporary, "driver");
+        if (!directory.isDirectory() && !directory.mkdirs()) return text("dmAndroidLaunchDriverFailed");
+        File library = new File(directory, "vulkan.purple.so");
+        try (InputStream source = getAssets().open(TURNIP_ASSET);
+             OutputStream target = new FileOutputStream(library, false)) {
+            byte[] buffer = new byte[262144];
+            int count;
+            while ((count = source.read(buffer)) > 0) target.write(buffer, 0, count);
+        } catch (IOException error) {
+            return error.getMessage();
+        }
+        write(configuration, "# 由启动界面写入（内置 Turnip）| written by the launcher (built-in Turnip)\n"
+                + "directory=" + directory.getAbsolutePath() + "\n"
+                + "library=vulkan.purple.so\n"
+                + "require_custom=0\n"
+                + "subgroup_size=" + profile + "\n");
+        return null;
+    }
+
     private String importLabel() {
-        String summary = LaunchSettings.read(stateFile(), "package_summary");
-        return summary == null ? text("dmAndroidLaunchImport") + "：" + text("dmAndroidLaunchNotSet")
-                               : String.format(text("dmAndroidLaunchImported"), summary);
+        return packageSummary.isEmpty()
+                ? text("dmAndroidLaunchImport") + "：" + text("dmAndroidLaunchNotSet")
+                : String.format(text("dmAndroidLaunchImported"), packageSummary);
+    }
+
+    // 启动界面自己的状态文件：只放界面显示需要的东西（导入摘要、所选驱动），native 不读它。
+    // The launcher's own state file: display-only data (import summary, chosen driver), never read by native.
+    private void writeState() {
+        StringBuilder content = new StringBuilder("# 仅供界面显示 | display only\n");
+        if (!packageSummary.isEmpty()) content.append("package_summary=").append(packageSummary).append('\n');
+        content.append("driver=").append(DRIVER_STATES[driverIndex]).append('\n');
+        write(stateFile(), content.toString());
     }
 
     // 没有数据包就把"启动游戏"置灰：点了会失败的事不该看起来能点。
@@ -201,6 +290,7 @@ public final class LauncherActivity extends Activity {
     private void applyLabels() {
         if (profileItem != null) profileItem.setText(profileLabel());
         if (resolutionItem != null) resolutionItem.setText(resolutionLabel());
+        if (driverItem != null) driverItem.setText(driverLabel());
         if (importItem != null) importItem.setText(importLabel());
         if (startItem != null) updateStartState();
     }
@@ -216,6 +306,15 @@ public final class LauncherActivity extends Activity {
         String preset = LaunchSettings.read(configFile(), "resolution");
         resolutionIndex = 0;
         if (preset != null) for (int i = 0; i < RESOLUTION_PRESETS.length; i++) if (RESOLUTION_PRESETS[i].equals(preset)) resolutionIndex = i;
+        // 驱动选择记在启动界面自己的状态文件里：launch-settings.conf 由 native 按严格白名单解析，塞不进新键。
+        // APK 没带内置驱动时强制回到系统驱动，免得状态文件里的旧值让界面显示一个不存在的选项。
+        // The driver choice lives in the launcher's own state file: launch-settings.conf is parsed by native
+        // against a strict key whitelist, so a new key cannot go there. When the APK ships no built-in driver the
+        // choice is forced back to the system driver, so a stale value cannot make the screen offer a missing one.
+        String driver = LaunchSettings.read(stateFile(), "driver");
+        driverIndex = 0;
+        if (driver != null) for (int i = 0; i < DRIVER_STATES.length; i++) if (DRIVER_STATES[i].equals(driver)) driverIndex = i;
+        if (!turnipBundled()) driverIndex = 0;
         applyLabels();
     }
 
@@ -258,6 +357,12 @@ public final class LauncherActivity extends Activity {
         resolutionItem = item(resolutionLabel(), 19, PARCHMENT, false, true);
         resolutionItem.setOnClickListener(v -> { resolutionIndex = (resolutionIndex + 1) % RESOLUTION_PRESETS.length; applyLabels(); });
         column.addView(resolutionItem);
+
+        if (turnipBundled()) {
+            driverItem = item(driverLabel(), 19, PARCHMENT, false, true);
+            driverItem.setOnClickListener(v -> { driverIndex = (driverIndex + 1) % DRIVER_STATES.length; applyLabels(); writeState(); });
+            column.addView(driverItem);
+        }
 
         importItem = item(importLabel(), 19, PARCHMENT, false, true);
         importItem.setOnClickListener(v -> pickPackage());
@@ -405,7 +510,8 @@ public final class LauncherActivity extends Activity {
             try {
                 String summary = extract(uri, documentSize(uri));
                 runOnUiThread(() -> {
-                    write(stateFile(), "# 导入结果，仅供界面显示 | import result, display only\npackage_summary=" + summary + "\n");
+                    packageSummary = summary;
+                    writeState();
                     refreshFromDisk();
                     setStatus(summary, PARCHMENT);
                 });
@@ -487,6 +593,18 @@ public final class LauncherActivity extends Activity {
             setStatus(text("dmAndroidLaunchNeedsImport"), WARNING);
             return;
         }
+        // 先把驱动准备好（选内置 Turnip 就把 .so 复制到内部可执行目录并写 gpu-driver.conf，选系统驱动就删掉它）。
+        // 失败就停下不启动：否则玩家以为在用内置驱动，实际跑的是系统驱动。
+        // Prepare the driver first (copy the .so into internal executable storage and write gpu-driver.conf for the
+        // built-in Turnip; delete it for the system driver). On failure stop rather than start: the player would
+        // otherwise believe the built-in driver is in use while the system one runs.
+        setStatus(text("dmAndroidLaunchDriverPreparing"), MUTED);
+        String driverProblem = prepareDriver();
+        if (driverProblem != null) {
+            setStatus(String.format(text("dmAndroidLaunchDriverFailed"), driverProblem), WARNING);
+            return;
+        }
+        setStatus("", PARCHMENT);
         StringBuilder content = new StringBuilder();
         content.append("# 由启动界面写入 | written by the launcher\n");
         content.append("debug_overlay=").append(overlaySwitch.isChecked() ? "1" : "0").append('\n');

@@ -69,7 +69,12 @@ python3 dm/android/tools/ci_checks.py          # 可选：跑与仓库 CI 相同
 
 - **上游**：[jhaizhou-ops/d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile)（基线 `2eb5758771f110cd53082b999d88d242766610da`）。保留其 [MIT 许可](LICENSE) 及第三方许可声明。
 - **优化参考**：Eden（Switch 模拟器，参考其渲染与超分做法；其着色器翻译是 GPL-3.0，**不并入**本 MIT 项目）与 LASRecomp。
+- **随包分发的图形驱动**：[Turnip](https://gitlab.freedesktop.org/mesa/mesa)（Mesa 的开源 Vulkan 驱动，MIT 许可）—— T30 版 Adreno 构建，作者 **@Mr_Purple_666**（`vulkan.purple.so`，`26.3.0-T30-1.4.359`），原样放在 `dm/android/prebuilt/turnip/` 并附其 `meta.json`。启动界面也可以改用手机自带驱动。
 - **构建依赖**：Android NDK r28c、JDK 17、Android SDK build-tools / platform 35（`bootstrap.py` 自动安装的版本为准）。
 - **打包游戏数据另需**（只在玩家电脑上）：Python venv（`lz4` / `capstone` 等）、`hactool`、.NET 10 SDK；技能里的前置条件表逐项列出了它们。
 
-**本仓库不包含**游戏程序、RomFS、密钥、存档、翻译后的游戏着色器、预编译驱动或 APK。真实 APK 里的游戏模块与数据包都由玩家用**自己的**文件在本机生成，不随仓库或 Release 分发。CI（GitHub Actions）只构建不含游戏代码的通用 APK 与上述套件，见[构建说明](docs/ANDROID_BUILD.zh-CN.md#自动流水线github-actions)。
+**本仓库不包含**游戏程序、RomFS、密钥、存档、翻译后的游戏着色器或 APK。真实 APK 里的游戏模块与数据包都由玩家用**自己的**文件在本机生成，不随仓库或 Release 分发。
+
+仓库**带一个第三方二进制**：**Turnip** 图形驱动（`dm/android/prebuilt/turnip/vulkan.purple.so`，Mesa，MIT 许可，T30 构建者为 **@Mr_Purple_666**），构建时会被打进 APK。启动界面可以在它和手机自带驱动之间切换。实测：手机自带的 Adreno 驱动会出现**人物周边的方块状光照**，Turnip 画面正常，两者帧率都在 60 上下。Turnip 需要 Android 11+（`minApi 30`）；游戏的着色器按 64 的子组尺寸构建，所以启动界面会把数据包里的 `host-subgroup-size.txt` 照抄进驱动配置。构建时加 `--no-turnip` 出不含驱动的包。详见[驱动说明](docs/ANDROID_GPU_DRIVER.zh-CN.md)。
+
+CI（GitHub Actions）构建上面那个 APK 与套件，见[构建说明](docs/ANDROID_BUILD.zh-CN.md#自动流水线github-actions)。

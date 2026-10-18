@@ -161,6 +161,7 @@ uint64_t dm_android_nvn_time(void) { return dm_android_clock_ns(CLOCK_MONOTONIC)
 int dm_nvn_ruler_truth(void) { return 0; }
 
 #include "nvn_vulkan_pipeline_cache.inc"
+#include "nvn_vulkan_cpu_phases.inc"
 
 #ifdef DM_VK_REFERENCE_GATES
 #include "nvn_vulkan_test_gate.inc"
@@ -902,16 +903,18 @@ static void frame_stability_record(uint64_t frame,uint64_t prev_acquire,uint64_t
 }
 uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
     uint64_t acquire_ns=0,present_ns=0,present_lock_ns=0;
+    uint64_t present_total=dm_cpu_phase_begin();
     // Present 排队显示；CPU 可见完成仍由真实 sync/finish 和 texture 重用等待保证。
     // Present queues display work; real sync/finish and texture-reuse waits retain CPU-visible completion.
-    if(recording)mtl_sub_commit();
+    if(recording){uint64_t phase=dm_cpu_phase_begin();mtl_sub_commit();dm_cpu_phase_end(DM_CPU_PHASE_SUBMIT,phase);}
     // 将真实目标周期告知系统显示策略；不改游戏节拍或GPU同步。
     // Inform system display policy of the actual target period without changing pacing or GPU synchronization.
     if(dm_android_window_frame_period)dm_android_window_frame_period(period);
     uint64_t completion_ticket=mtl_last_fence(),previous_acquire=screen_acquire_ticket;
-    uint64_t previous_start=dm_android_clock_ns(CLOCK_MONOTONIC);
+    uint64_t previous_start=dm_cpu_phase_begin();
     if(previous_acquire&&!mtl_wait(previous_acquire,UINT64_MAX))die("Vulkan prior acquire consumer wait failed");
     uint64_t previous_acquire_ns=dm_android_clock_ns(CLOCK_MONOTONIC)-previous_start;
+    dm_cpu_phase_end(DM_CPU_PHASE_WAIT_PRIOR,previous_start);
     uint64_t ticket=++presents;graphics_probe_capture(ticket);
     if(!(ticket%60))LOG("[vulkan-prior-acquire] frame=%llu queued=%llu prior_consumer=%llu wait=%.3f ms scope=prior_binary_acquire_consumer current_guest_publication=async",(unsigned long long)ticket,(unsigned long long)completion_ticket,(unsigned long long)previous_acquire,previous_acquire_ns/1e6);
     if (swapchain) {
@@ -921,8 +924,10 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
         uint64_t acquire_start=dm_android_clock_ns(CLOCK_MONOTONIC);
         uint32_t index; VkResult result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, screen_acquired, VK_NULL_HANDLE, &index);
         acquire_ns=dm_android_clock_ns(CLOCK_MONOTONIC)-acquire_start;
+        dm_cpu_phase_end(DM_CPU_PHASE_ACQUIRE,acquire_start);
         if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) die("Vulkan acquire: %d", result);
         if(index>=screen_count)die("Vulkan acquire image bounds");screen_rendered=screen_present_wait[index];
+        uint64_t blit_phase=dm_cpu_phase_begin();
         mtl_sub_begin(); image_entry *e = image_get(t); image_access(e,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);
         VkImageMemoryBarrier barrier = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .oldLayout = screen_initialized[index] ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = screen_images[index], .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
         // 首布局转换与 acquire 的 TRANSFER wait 相接，不越过显示引擎对 image 的使用。
@@ -939,10 +944,12 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
         barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; barrier.dstAccessMask = 0; barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
         vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
         screen_submission = 1; completion_ticket=screen_acquire_ticket=mtl_sub_commit(); screen_submission = 0; screen_initialized[index] = 1;
+        dm_cpu_phase_end(DM_CPU_PHASE_BLIT,blit_phase);
         VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &screen_rendered, .swapchainCount = 1, .pSwapchains = &swapchain, .pImageIndices = &index};
         uint64_t present_lock_start=dm_android_clock_ns(CLOCK_MONOTONIC);pthread_mutex_lock(&queue_lock);
         uint64_t present_start=dm_android_clock_ns(CLOCK_MONOTONIC);present_lock_ns=present_start-present_lock_start;
         result = vkQueuePresentKHR(queue, &pi);present_ns=dm_android_clock_ns(CLOCK_MONOTONIC)-present_start;
+        dm_cpu_phase_end(DM_CPU_PHASE_PRESENT,present_lock_start);
         if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) die("Vulkan present: %d", result); pthread_mutex_unlock(&queue_lock);
         if(ticket<=3||!(ticket%600))LOG("[vulkan-present] frame=%llu image=%u submit=%llu completed=%llu semaphore_per_image=1 queue_idle=0",(unsigned long long)ticket,index,(unsigned long long)screen_acquire_ticket,(unsigned long long)atomic_load(&completed));
         if (ticket <= 3 || ticket == 30) LOG("[vulkan] Android game frame %llu presented", (unsigned long long)ticket);
@@ -957,6 +964,7 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
         for (uint64_t i = 0; i < (uint64_t)w * h; ++i) { fwrite(pixels + i * 4, 1, 3, file); nonblack += !!(pixels[i * 4] | pixels[i * 4 + 1] | pixels[i * 4 + 2]); }
         fclose(file); free(pixels); LOG("[vulkan] game frame %llu capture=%s nonblack=%llu draws=%llu", (unsigned long long)ticket, path, (unsigned long long)nonblack, (unsigned long long)draw_count);
     }
+    dm_cpu_phase_end(DM_CPU_PHASE_PRESENT_TOTAL,present_total);
     static uint64_t perf_time,perf_submit,perf_bytes,perf_allocations,perf_hits,perf_passes,perf_barriers,perf_create_wall,perf_create_cpu;
     static double perf_gpu,perf_wait;
     uint64_t now=dm_android_clock_ns(CLOCK_MONOTONIC);
@@ -967,14 +975,22 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
         driver_fast_previous=uniform_driver_fast_hits;driver_build_previous=uniform_driver_builds;driver_bytes_previous=uniform_driver_avoided_bytes;driver_clear_previous=uniform_clear_avoided_bytes;}
     pthread_mutex_unlock(&queue_lock);
     if(ticket==1){perf_time=now;perf_submit=atomic_load(&submitted);perf_bytes=snapshot_bytes;perf_allocations=buffer_allocations;perf_hits=read_cache_hits;perf_create_wall=buffer_create_wall_ns;perf_create_cpu=buffer_create_cpu_ns;}
-    else if(ticket%60==0){unsigned frames=ticket==60?59:60;LOG("[vulkan-perf] frame=%llu fps=%.2f submits/frame=%.1f snapshots/frame=%.1f MB allocations/frame=%.1f new_buf_wall_ms/frame=%.3f new_buf_cpu_ms/frame=%.3f vertex_hits=%llu cache=%llu MB",(unsigned long long)ticket,frames*1e9/(now-perf_time),(double)(atomic_load(&submitted)-perf_submit)/frames,(double)(snapshot_bytes-perf_bytes)/(frames*1048576.),(double)(buffer_allocations-perf_allocations)/frames,(double)(buffer_create_wall_ns-perf_create_wall)/(frames*1e6),(double)(buffer_create_cpu_ns-perf_create_cpu)/(frames*1e6),(unsigned long long)(read_cache_hits-perf_hits),(unsigned long long)(read_cache_bytes>>20));perf_time=now;perf_submit=atomic_load(&submitted);perf_bytes=snapshot_bytes;perf_allocations=buffer_allocations;perf_hits=read_cache_hits;perf_create_wall=buffer_create_wall_ns;perf_create_cpu=buffer_create_cpu_ns;}
+    else if(ticket%60==0){unsigned frames=ticket==60?59:60;dm_cpu_phase_report(frames);LOG("[vulkan-perf] frame=%llu fps=%.2f submits/frame=%.1f snapshots/frame=%.1f MB allocations/frame=%.1f new_buf_wall_ms/frame=%.3f new_buf_cpu_ms/frame=%.3f vertex_hits=%llu cache=%llu MB",(unsigned long long)ticket,frames*1e9/(now-perf_time),(double)(atomic_load(&submitted)-perf_submit)/frames,(double)(snapshot_bytes-perf_bytes)/(frames*1048576.),(double)(buffer_allocations-perf_allocations)/frames,(double)(buffer_create_wall_ns-perf_create_wall)/(frames*1e6),(double)(buffer_create_cpu_ns-perf_create_cpu)/(frames*1e6),(unsigned long long)(read_cache_hits-perf_hits),(unsigned long long)(read_cache_bytes>>20));perf_time=now;perf_submit=atomic_load(&submitted);perf_bytes=snapshot_bytes;perf_allocations=buffer_allocations;perf_hits=read_cache_hits;perf_create_wall=buffer_create_wall_ns;perf_create_cpu=buffer_create_cpu_ns;}
     if(ticket==1){perf_gpu=current_gpu;perf_wait=current_wait;}
     else if(ticket%60==0){unsigned frames=ticket==60?59:60;LOG("[vulkan-time] frame=%llu GPU=%.2f ms/frame fence_wait=%.2f ms/frame (GPU batch spans; exclude present/vsync)",(unsigned long long)ticket,batch_times?(current_gpu-perf_gpu)/(frames*1e6):-1,(current_wait-perf_wait)/(frames*1e6));perf_gpu=current_gpu;perf_wait=current_wait;}
+    // 异常帧日志：每个出图边界取一次本帧的间隔、线程 CPU 与 GPU；只有越线的帧写进单独文件。
+    // Abnormal-frame log: take this frame's interval, thread CPU and GPU at every present boundary; only frames
+    // over the thresholds are written to their own file.
+    {static uint64_t abnormal_wall,abnormal_cpu,abnormal_gpu;
+     uint64_t abnormal_now=dm_android_clock_ns(CLOCK_MONOTONIC),abnormal_thread=dm_android_clock_ns(CLOCK_THREAD_CPUTIME_ID);
+     if(abnormal_wall&&abnormal_now>=abnormal_wall&&abnormal_thread>=abnormal_cpu)
+         dm_abnormal_frame(ticket,abnormal_now-abnormal_wall,abnormal_thread-abnormal_cpu,current_gpu-abnormal_gpu,draw_count,render_passes,texture_uploads,uniform_version_read_bytes,uniform_version_misses,descriptor_version_misses);
+     abnormal_wall=abnormal_now;abnormal_cpu=abnormal_thread;abnormal_gpu=current_gpu;}
     if(ticket==1){perf_passes=render_passes;perf_barriers=image_barriers;}
     else if(ticket%60==0){unsigned frames=ticket==60?59:60;LOG("[vulkan-passes] frame=%llu passes/frame=%.1f image_barriers/frame=%.1f UBO_arena=%.1f MB driver_hits=%llu layout/pass/frame objects=%llu/%llu/%llu",(unsigned long long)ticket,(render_passes-perf_passes)/(double)frames,(image_barriers-perf_barriers)/(double)frames,uniform_arena_bytes/1048576.,(unsigned long long)uniform_driver_hits,(unsigned long long)graphics_layout_creations,(unsigned long long)graphics_pass_creations,(unsigned long long)graphics_frame_creations);perf_passes=render_passes;perf_barriers=image_barriers;}
-    static uint64_t binding_hits,binding_misses,descriptor_hits,descriptor_misses,binding_bytes,binding_compare,binding_copy,dependency_waits;
+    static uint64_t binding_hits,binding_misses,descriptor_hits,descriptor_misses,binding_bytes,binding_compare,binding_copy,dependency_waits,binding_overwrites,binding_uploads,binding_unregistered;
     if(ticket==1){binding_hits=uniform_version_hits;binding_misses=uniform_version_misses;descriptor_hits=descriptor_version_hits;descriptor_misses=descriptor_version_misses;binding_bytes=uniform_version_read_bytes;binding_compare=uniform_version_compare_bytes;binding_copy=uniform_version_copy_bytes;dependency_waits=dependency_flushes;}
-    else if(ticket%60==0){unsigned frames=ticket==60?59:60;LOG("[vulkan-bindings] frame=%llu UBO byte_hits/miss=%.1f/%.1f descriptors hits/miss=%.1f/%.1f UBO_read=%.2f MB/frame UBO_compare=%.2f MB/frame UBO_arena_copy=%.2f MB/frame dependency_wait=%.1f/frame",(unsigned long long)ticket,(uniform_version_hits-binding_hits)/(double)frames,(uniform_version_misses-binding_misses)/(double)frames,(descriptor_version_hits-descriptor_hits)/(double)frames,(descriptor_version_misses-descriptor_misses)/(double)frames,(uniform_version_read_bytes-binding_bytes)/(frames*1048576.),(uniform_version_compare_bytes-binding_compare)/(frames*1048576.),(uniform_version_copy_bytes-binding_copy)/(frames*1048576.),(dependency_flushes-dependency_waits)/(double)frames);binding_hits=uniform_version_hits;binding_misses=uniform_version_misses;descriptor_hits=descriptor_version_hits;descriptor_misses=descriptor_version_misses;binding_bytes=uniform_version_read_bytes;binding_compare=uniform_version_compare_bytes;binding_copy=uniform_version_copy_bytes;dependency_waits=dependency_flushes;}
+    else if(ticket%60==0){unsigned frames=ticket==60?59:60;LOG("[vulkan-bindings] frame=%llu UBO byte_hits/miss=%.1f/%.1f descriptors hits/miss=%.1f/%.1f UBO_read=%.2f MB/frame UBO_compare=%.2f MB/frame UBO_arena_copy=%.2f MB/frame dependency_wait=%.1f/frame gpu_overwrite=%.2f/frame uploads=%.2f/frame unregistered_tex=%.2f/frame",(unsigned long long)ticket,(uniform_version_hits-binding_hits)/(double)frames,(uniform_version_misses-binding_misses)/(double)frames,(descriptor_version_hits-descriptor_hits)/(double)frames,(descriptor_version_misses-descriptor_misses)/(double)frames,(uniform_version_read_bytes-binding_bytes)/(frames*1048576.),(uniform_version_compare_bytes-binding_compare)/(frames*1048576.),(uniform_version_copy_bytes-binding_copy)/(frames*1048576.),(dependency_flushes-dependency_waits)/(double)frames,(image_gpu_overwrites-binding_overwrites)/(double)frames,(texture_uploads-binding_uploads)/(double)frames,(gpu_unregistered_textures-binding_unregistered)/(double)frames);binding_unregistered=gpu_unregistered_textures;binding_hits=uniform_version_hits;binding_misses=uniform_version_misses;descriptor_hits=descriptor_version_hits;descriptor_misses=descriptor_version_misses;binding_bytes=uniform_version_read_bytes;binding_compare=uniform_version_compare_bytes;binding_copy=uniform_version_copy_bytes;dependency_waits=dependency_flushes;binding_overwrites=image_gpu_overwrites;binding_uploads=texture_uploads;}
     static uniform_read_counters uniform_read_previous;
     if(ticket==1)uniform_read_previous=uniform_read_stats;
     else if(ticket%60==0){unsigned frames=ticket==60?59:60;const uniform_read_counters *s=&uniform_read_stats;

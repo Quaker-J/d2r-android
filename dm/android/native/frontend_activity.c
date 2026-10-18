@@ -261,6 +261,10 @@ static void *boot(void *argument) {
     if(cache_path>0&&(size_t)cache_path<sizeof path&&(!mkdir(path,0700)||errno==EEXIST))setenv("DM_VK_PIPELINE_CACHE_DIR",path,1);
     else{unsetenv("DM_VK_PIPELINE_CACHE_DIR");LOG("[vulkan-pipeline-cache] directory_unavailable=1");}
     snprintf(path,sizeof path,"%s/temp",s->activity->internalDataPath);mkdir(path,0700);setenv("DM_TEMP",path,1);
+    // 异常帧日志与 game.log 同目录，便于一起取回；只作诊断，不参与任何游戏状态。
+    // The abnormal-frame log sits beside game.log so both are retrieved together; it is diagnostics only and
+    // never part of game state.
+    setenv("DM_DATA",s->activity->internalDataPath,1);
     // 在游戏首次缓存运行档及输入日志之前应用完整验证过的本应用设置。
     // Apply fully validated application settings before the guest first caches its operation mode and input log.
     dm_android_launch_settings launch;char launch_error[512];
@@ -495,7 +499,37 @@ static void window_created(ANativeActivity *a,ANativeWindow *w) {game_app *s=a->
         // measured on device, 图形恢复 (onResume) comes first and the window after — so a late window has to put
         // the state back here, based on whether the app is in the foreground; otherwise nothing would release
         // that suspension and the game would stay stuck on its last frame.
-        if(atomic_load(&s->activity_resumed))dm_gfx_suspend(0);}}
+        // 同时解除客体时钟冻结：旋转若走的是"销毁+重建窗口"这条路（有些设备/版本如此，见下面的 window_resized），
+        // 那次 window_destroyed 里冻了时钟，而旋转不经过 onPause/onResume，没人来解冻，游戏会永远停拍。在前台拿到窗口
+        // 就该是走着的：正常回前台那条路 onResume 已经解过，这里是幂等的空操作。
+        // The guest clock freeze is released here too: if a rotation takes the "destroy + recreate the window" route
+        // (some devices/versions do so; see window_resized below) that window_destroyed froze the clock, and a
+        // rotation passes through neither onPause nor onResume, so nothing would unfreeze it and the game would stop
+        // ticking forever. A window handed to us in the foreground means it should be running: on the normal
+        // return-from-background path onResume already released it, so this is an idempotent no-op there.
+        if(atomic_load(&s->activity_resumed)){dm_gfx_suspend(0);guest_clock_freeze_for(1,0);}}}
+// 旋转或窗口尺寸变化（配置变化时安卓不重建窗口，只改尺寸，所以不会走 window_destroyed/created）：交换链是按建链时的
+// 尺寸建的，不重建的话新画面会被合成器按旧尺寸拉伸或裁掉，于是这里复用「从后台回来」那一条重建路径 ——
+// mtl_screen_attach 先挂起图形（游戏线程不能在外面读交换链）再按窗口的最新尺寸重建表面与交换链。
+// 系统只在**同一个**窗口的宽或高变了时才发这个回调；换成新窗口走 onNativeWindowCreated（见 window_created）。
+// 旋转不经过 onPause/onResume，且是瞬时的，所以**不**冻结客体时钟（那是进后台才做的），只按当前是否在前台放开挂起。
+// A rotation or window-size change (Android does not rebuild the window for a configuration change, it only
+// resizes it, so this never arrives as window_destroyed/created): the swapchain was built at the old size, and
+// without rebuilding it the compositor stretches or crops the new frame, so this reuses the return-from-background
+// rebuild -- mtl_screen_attach suspends graphics first (the game thread must not be reading the swapchain) and then
+// rebuilds the surface and swapchain at the window's latest size. The system fires this only when the width or
+// height of the *same* window changed; a new window goes through onNativeWindowCreated (see window_created). A
+// rotation does not pass through onPause/onResume and is instantaneous, so the guest clock is **not** frozen (that
+// is for going to the background); the suspension is released per the current foreground state.
+static void window_resized(ANativeActivity *a,ANativeWindow *w) {game_app *s=a->instance;
+    pthread_mutex_lock(&s->lock);int same_window=s->window==w;pthread_mutex_unlock(&s->lock);
+    // 同一个窗口才处理：新窗口有 onNativeWindowCreated 那条路；后端还没活时也没有交换链要重建，第一次出图会自己建。
+    // 重建这一拍会慢（表面/交换链重建、缓存变冷），照回前台那次一样先告诉动态分辨率控制器别把它当成 GPU 吃紧。
+    // Only the same window is handled here: a new one goes through onNativeWindowCreated, and while the backend is
+    // not live yet there is no swapchain to rebuild -- the first present builds it itself. The rebuilding frame is
+    // slow (surface/swapchain rebuild, caches gone cold), so as on returning to the foreground the dynamic
+    // resolution controller is told not to read it as GPU pressure.
+    if(same_window&&atomic_load(&s->started)){void mtl_screen_attach(struct ANativeWindow *);mtl_screen_attach(w);dm_3d_scale_resumed();if(atomic_load(&s->activity_resumed))dm_gfx_suspend(0);LOG("[android] 窗口尺寸变化：表面与交换链已按新尺寸重建，进程与本局保留");}}
 static void window_destroyed(ANativeActivity *a,ANativeWindow *w) {game_app *s=a->instance;
     // 窗口销毁不再等于退出进程：安卓在 Activity 停止时必然销毁窗口，保留进程才能在回到前台时接着玩。
     // 退出前照 Mac/iOS 请游戏存盘（否则丢掉上一次提交之后的进度），再释放表面与交换链；真正退出走 destroyed()。
@@ -559,6 +593,6 @@ __attribute__((visibility("default"))) void ANativeActivity_onCreate(ANativeActi
     };
     if((*a->env)->RegisterNatives(a->env,klass,methods,sizeof methods/sizeof methods[0])!=JNI_OK){(*a->env)->ExceptionDescribe(a->env);(*a->env)->ExceptionClear(a->env);ANativeActivity_finish(a);return;}(*a->env)->DeleteLocalRef(a->env,klass);
     (void)saved;(void)bytes;game_app *s=calloc(1,sizeof *s);if(!s){ANativeActivity_finish(a);return;}s->activity=a;a->instance=s;application=s;pthread_mutex_init(&s->lock,NULL);pthread_cond_init(&s->ready,NULL);
-    a->callbacks->onNativeWindowCreated=window_created;a->callbacks->onNativeWindowDestroyed=window_destroyed;a->callbacks->onInputQueueCreated=input_created;a->callbacks->onInputQueueDestroyed=input_destroyed;a->callbacks->onPause=paused;a->callbacks->onResume=resumed;a->callbacks->onDestroy=destroyed;
+    a->callbacks->onNativeWindowCreated=window_created;a->callbacks->onNativeWindowResized=window_resized;a->callbacks->onNativeWindowDestroyed=window_destroyed;a->callbacks->onInputQueueCreated=input_created;a->callbacks->onInputQueueDestroyed=input_destroyed;a->callbacks->onPause=paused;a->callbacks->onResume=resumed;a->callbacks->onDestroy=destroyed;
     ANativeActivity_setWindowFlags(a,AWINDOW_FLAG_FULLSCREEN|AWINDOW_FLAG_KEEP_SCREEN_ON,0);pthread_attr_t attr;pthread_attr_init(&attr);pthread_attr_setstacksize(&attr,64u<<20);int error=pthread_create(&s->worker,&attr,boot,s);pthread_attr_destroy(&attr);if(error)ANativeActivity_finish(a);
 }

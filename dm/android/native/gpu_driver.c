@@ -58,8 +58,13 @@ static int configure(dm_vk_driver *d) {
     const char *subgroup=getenv("DM_VK_SUBGROUP_SIZE");
     if(subgroup&&!parse_subgroup_size(d,subgroup))return 0;
     char path[1200];const char *config=getenv("DM_VK_DRIVER_CONFIG"),*temporary=getenv("DM_TEMP");
+    driver_log("driver configuration lookup: DM_VK_DRIVER_CONFIG=%s DM_TEMP=%s",config?config:"(unset)",temporary?temporary:"(unset)");
     if(!config&&temporary){if(snprintf(path,sizeof path,"%s/gpu-driver.conf",temporary)>=(int)sizeof path)return driver_error(d,"driver configuration path is too long");config=path;}
-    if(config){FILE *file=fopen(config,"r");if(!file){if(errno!=ENOENT)return driver_error(d,"cannot open driver configuration: %s",strerror(errno));}
+    if(config){FILE *file=fopen(config,"r");if(!file){if(errno!=ENOENT)return driver_error(d,"cannot open driver configuration: %s",strerror(errno));
+            // 配置缺失会让严格请求静默退回系统驱动；必须记下实际尝试的路径与来源。
+            // A missing configuration would silently drop a strict request back to the system driver, so record the
+            // path actually tried and where it came from.
+            else driver_log("driver configuration not found: %s (DM_VK_DRIVER_CONFIG=%s DM_TEMP=%s)",config,getenv("DM_VK_DRIVER_CONFIG")?getenv("DM_VK_DRIVER_CONFIG"):"(unset)",temporary?temporary:"(unset)");}
         else{d->requested_custom=1;char line[2048],first_error[512]={0};int ok=1,driver_keys=0,subgroup_keys=0;
             // 即使前面的行有错，也读完整policy；后置require_custom=1不能被忽略。
             // Read the complete policy even after an earlier error; do not ignore a later require_custom=1.

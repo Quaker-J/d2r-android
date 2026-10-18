@@ -69,7 +69,12 @@ Captured on the device (OPPO OPD2409 / Adreno 830). The block in the top-left co
 
 - **Upstream**: [jhaizhou-ops/d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile) at `2eb5758771f110cd53082b999d88d242766610da`; its [MIT license](LICENSE) and third-party notices are retained.
 - **Optimization references**: Eden (a Switch emulator; its rendering and upscaling ideas are referenced, but its shader translation is GPL-3.0 and is **not** merged into this MIT project) and LASRecomp.
+- **Bundled graphics driver**: [Turnip](https://gitlab.freedesktop.org/mesa/mesa) (Mesa's open-source Vulkan driver, MIT) — the T30 Adreno build by **@Mr_Purple_666** (`vulkan.purple.so`, `26.3.0-T30-1.4.359`), shipped unmodified at `dm/android/prebuilt/turnip/` together with its `meta.json`. The launcher can also run on the phone's own driver.
 - **Build dependencies**: Android NDK r28c, JDK 17, Android SDK build-tools / platform 35 (pinned by `bootstrap.py`).
 - **Packing game data additionally needs** (on the player's PC only): a Python venv (`lz4`, `capstone`, ...), `hactool`, and the .NET 10 SDK; the skill's prerequisites table lists them.
 
-**This repository does not contain** game executables, RomFS, keys, saves, translated game shaders, prebuilt drivers or APKs. The game modules and the data package are produced locally from **your own** files and are never distributed here or in a release. CI (GitHub Actions) builds only the generic APK and the kit described above; see [the build notes](docs/ANDROID_BUILD.md).
+**This repository does not contain** game executables, RomFS, keys, saves, translated game shaders or APKs. The game modules and the data package are produced locally from **your own** files and are never distributed here or in a release.
+
+It **does** ship one third-party binary: a **Turnip** Vulkan driver (`dm/android/prebuilt/turnip/vulkan.purple.so`, Mesa, MIT — T30 build by **@Mr_Purple_666**), which the build packs into the APK. The launcher can switch between it and the phone's own driver; on the test device the system Adreno driver renders **blocky lighting around the player** where Turnip renders it correctly, at the same ~60 FPS. Turnip needs Android 11+ (`minApi 30`), and the game's shaders are built for a subgroup size of 64, so the launcher writes the package's own `host-subgroup-size.txt` value into the driver configuration. Building with `--no-turnip` produces a driver-free APK instead. See [the driver notes](docs/ANDROID_GPU_DRIVER.zh-CN.md).
+
+CI (GitHub Actions) builds the APK and the kit described above; see [the build notes](docs/ANDROID_BUILD.md).
