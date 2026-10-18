@@ -4,6 +4,8 @@ English: [LEGACY_DEVICES.md](LEGACY_DEVICES.md)
 
 iPhone 14 系列、iPhone 15 / 15 Plus 以及更早的机型可以玩，只是多一步：要用你自己的游戏文件做一份**老机型贴图包**，放进手机。这一页从头讲到尾。
 
+Android 端（Mali 等不支持 BC 的设备）用同一套 `astc_pack.py` / `casc_overlay.py`，但补充档要直接打进格式 1 数据包，步骤见 [Android ASTC 数据包](ANDROID_ASTC_PACK.zh-CN.md)。
+
 ## 为什么要多这一步
 
 游戏的贴图绝大多数用的是 BC 压缩格式。苹果的显卡从 A17 Pro（iPhone 15 Pro）起才支持这种格式，更早的芯片不认。做法是在电脑上把这些贴图离线转成这些机型支持的 ASTC 格式，画面是同一份画面。贴图是游戏内容，所以这个包不能由我们提供，只能用你自己的游戏文件在你自己的电脑上生成。

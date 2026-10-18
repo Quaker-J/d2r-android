@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """构建期改写 Switch 静态 CASC：让指定逻辑路径指向新内容（原生方式，不用 D2R mod、运行时零改动）。
 
-用法：casc_overlay.py <RomFS> <输出目录> <替换表.tsv>
-替换表每行「逻辑路径<TAB>新文件」。输出目录 = 覆盖层：改动文件实写，其余逐文件软链接原件；空表 ⇒ 全部链接、逐字节等于原件。
+用法：casc_overlay.py [--link-mode auto|symlink|hardlink|copy] <RomFS> <输出目录> <替换表.tsv>
+替换表每行「逻辑路径<TAB>新文件」。输出目录 = 覆盖层：改动文件实写，其余逐文件链接原件；空表 ⇒ 全部链接、逐字节等于原件。
+链接策略默认按平台选：macOS / Linux 用符号链接（iOS 出包脚本靠 islink 区分新数据档），Windows 用硬链接；硬链接跨卷或文件系统不支持时退回复制。
+Windows 未开开发者模式时符号链接会失败，不要显式指定 symlink。`copy` 最慢、占满一份完整 RomFS，只在硬链接也不可用时用。
 
 格式（对原版实算核过，游戏实际读取以 DM_FSLOG 为准）：
 - 游戏只读 data/.build.config 与 data/NN-MMMMMMMM.data；*.psv 清单是提取工具产物，游戏不读（这里只借它查路径 → 旧 EKey，
@@ -24,8 +26,10 @@
 Controller/HUDPanelHD.json 的 HealthBall x 141→441，标准存档、不加 -mod 进局，血球右移、HUD 其余不变、无【红】；
 EKey 或块校验算错时游戏读到新 vfs-root 即退出（有校验）。
 Build-time rewrite of the Switch static CASC: makes the given logical paths point to new content (the native way, no D2R mod, zero runtime changes).
-Usage: casc_overlay.py <RomFS> <output dir> <replacement-table.tsv>
-Each line of the replacement table is "logical path<TAB>new file". Output dir = overlay: changed files are actually written, the rest are symlinked file by file to the originals; empty table ⇒ everything linked, byte-for-byte equal to the originals.
+Usage: casc_overlay.py [--link-mode auto|symlink|hardlink|copy] <RomFS> <output dir> <replacement-table.tsv>
+Each line of the replacement table is "logical path<TAB>new file". Output dir = overlay: changed files are actually written, the rest are linked file by file to the originals; empty table ⇒ everything linked, byte-for-byte equal to the originals.
+The link strategy defaults by platform: symlinks on macOS / Linux (the iOS packaging script uses islink to tell the new data archive apart), hardlinks on Windows; hardlinks fall back to copying across volumes or on unsupported filesystems.
+Symlinks fail on Windows without developer mode, so do not explicitly select symlink there. `copy` is the slowest and uses a full extra RomFS; use it only when hardlinks are unavailable too.
 Format (computed and verified against the original game; what the game actually reads is determined by DM_FSLOG):
 - The game reads only data/.build.config and data/NN-MMMMMMMM.data; the *.psv manifests are output of the extraction tool and the game does not read them (here they are only borrowed to look up path → old EKey,
   then the entry is located in the TVFS container file table by a unique hit on that EKey; a hit count ≠ 1 is an error).
@@ -48,7 +52,9 @@ when the EKey or block checksum is computed wrong the game exits as soon as it r
 """
 
 import hashlib
+import os
 from pathlib import Path
+import shutil
 import struct
 import sys
 import zlib
@@ -56,6 +62,32 @@ import zlib
 
 def die(message):
     raise SystemExit(f"casc_overlay.py: {message}")
+
+
+_LINK_MODE = "auto"
+
+
+def set_link_mode(mode):
+    global _LINK_MODE
+    if mode not in ("auto", "symlink", "hardlink", "copy"):
+        die(f"unknown link mode: {mode}")
+    _LINK_MODE = mode
+
+
+def link_or_copy(target, source):
+    target.parent.mkdir(parents=True, exist_ok=True)
+    mode = _LINK_MODE
+    if mode == "auto":
+        mode = "hardlink" if os.name == "nt" else "symlink"
+    if mode == "symlink":
+        target.symlink_to(source.resolve())
+    elif mode == "copy":
+        shutil.copyfile(source, target)
+    else:
+        try:
+            os.link(source, target)
+        except OSError:
+            shutil.copyfile(source, target)
 
 
 def norm_path(value):
@@ -93,7 +125,7 @@ def link_tree(source, output, skip=()):
         if entry.is_dir() and not entry.is_symlink():
             link_tree(entry, target)
         else:
-            target.symlink_to(entry.resolve())
+            link_or_copy(target, entry)
 
 
 def read_manifest(source):
@@ -341,20 +373,22 @@ def set_cft_sizes(tvfs, pos, encoded_size, content_size):
     tvfs[pos + 20 + idx:pos + 24 + idx] = struct.pack(">I", content_size)
 
 
-def cft_position(vfs_content, cft_offset, cft_end, manifest, logical):
+def build_cft_index(vfs_content, cft_offset, cft_end):
+    """容器文件表一次建索引：旧 EKey → 条目位置。2.7 万条替换逐条全表扫描会退化成平方级。 | One index of the container file table: old EKey → entry positions. Scanning the whole table per replacement degenerates to quadratic time for 27k replacements."""
+    data = bytes(vfs_content)
+    mapping = {}
+    for pos in range(cft_offset, cft_end - 24, 25):
+        mapping.setdefault(data[pos:pos + 16], []).append(pos)
+    return mapping
+
+
+def cft_position(index, manifest, logical):
     """逻辑路径 → 它在 TVFS 容器文件表里的条目位置（按旧 EKey 唯一命中） | Logical path → the position of its entry in the TVFS container file table (unique hit by the old EKey)"""
     row = manifest.get(logical)
     if row is None:
         die("path not found in build_manifest.psv: " + logical)
     old_ekey = bytes.fromhex(row[6])
-    matches = []
-    search_at = cft_offset
-    while True:
-        position = vfs_content.find(old_ekey, search_at, cft_end)
-        if position < 0:
-            break
-        matches.append(position)
-        search_at = position + 1
+    matches = index.get(old_ekey, [])
     if len(matches) != 1:
         die(f"CFT key match count for {logical}: {len(matches)}")
     return matches[0]
@@ -398,11 +432,12 @@ def write_pack(source, output, replacements, location):
     cft_offset, cft_size = struct.unpack(">II", vfs_content[28:36])
     est_off, est_size = struct.unpack(">II", vfs_content[38:46])
     especs = bytes(vfs_content[est_off:est_off + est_size]).split(b"\0")
+    cft_index = build_cft_index(vfs_content, cft_offset, cft_offset + cft_size)
     items = []
     for logical, replacement in replacements.items():
         if logical.startswith("+"):
             die("pack 不支持新增路径: " + logical)
-        pos = cft_position(vfs_content, cft_offset, cft_offset + cft_size, manifest, logical)
+        pos = cft_position(cft_index, manifest, logical)
         items.append((logical, replacement, especs[vfs_content[pos + 20]].decode()))
     output.mkdir(parents=True, exist_ok=True)
     offset = 0
@@ -453,9 +488,13 @@ def rewrite_tvfs(source, output, replacements, prebuilt=None):
     updates = []
     adds = {k[1:]: v for k, v in replacements.items() if k.startswith("+")}
     replacements = {k: v for k, v in replacements.items() if not k.startswith("+")}
+    cft_index = build_cft_index(vfs_content, cft_offset, cft_end)
+    prebuilt = prebuilt or {}
     for logical, replacement in replacements.items():
-        updates.append((cft_position(vfs_content, cft_offset, cft_end, manifest, logical), replacement.read_bytes()))
-    prebuilt_pos = [(cft_position(vfs_content, cft_offset, cft_end, manifest, logical), entry) for logical, entry in (prebuilt or {}).items()]
+        if logical in prebuilt:   # 已经在独立数据档里：只改 TVFS 指向，不把内容再写进覆盖层新档 | Already in the standalone archive: only repoint the TVFS entry, do not copy the content into the overlay's new archive
+            continue
+        updates.append((cft_position(cft_index, manifest, logical), replacement.read_bytes()))
+    prebuilt_pos = [(cft_position(cft_index, manifest, logical), entry) for logical, entry in prebuilt.items()]
 
     new_chunk, new_archive = available_location(data_dir)
     new_data = bytearray()
@@ -517,7 +556,7 @@ def rewrite_tvfs(source, output, replacements, prebuilt=None):
     (output / "data" / ".build.config").write_text("".join(new_config), encoding="utf-8")
     for entry in data_dir.iterdir():
         if entry.name not in {".build.config", data_name}:
-            (output / "data" / entry.name).symlink_to(entry.resolve())
+            link_or_copy(output / "data" / entry.name, entry)
     print(f"overlay: {len(updates)} replacement(s), {len(adds)} addition(s), {len(prebuilt_pos)} prebuilt, TVFS rewritten, data={data_name}")
 
 
@@ -528,13 +567,21 @@ def make_overlay(source, output, replacements, prebuilt=None):
     (output / "data").mkdir()
     if not replacements and not prebuilt:
         for entry in (source / "data").iterdir():
-            (output / "data" / entry.name).symlink_to(entry.resolve())
+            link_or_copy(output / "data" / entry.name, entry)
         print("empty replacement table: linked all source files")
         return
     rewrite_tvfs(source, output, replacements, prebuilt)
 
 
 def main(argv):
+    link_mode = "auto"
+    if "--link-mode" in argv:
+        index = argv.index("--link-mode")
+        if index + 1 >= len(argv):
+            die("--link-mode needs one of auto|symlink|hardlink|copy")
+        link_mode = argv[index + 1]
+        argv = argv[:index] + argv[index + 2:]
+    set_link_mode(link_mode)
     if len(argv) == 6 and argv[1] == "pack":   # pack <RomFS> <输出目录> <替换表.tsv> <块号-档号> | pack <RomFS> <output dir> <replacement-table.tsv> <chunk number-archive number>
         chunk, archive = (int(x) for x in argv[5].split("-"))
         write_pack(Path(argv[2]).resolve(), Path(argv[3]).resolve(), read_replacements(argv[4]), (chunk, archive))
@@ -543,7 +590,7 @@ def main(argv):
     if len(argv) == 6 and argv[4] == "--prebuilt":
         prebuilt = read_prebuilt(argv[5]); argv = argv[:4]
     if len(argv) != 4:
-        die("usage: casc_overlay.py <RomFS> <output-dir> <replacements.tsv> [--prebuilt pack_index.tsv] | pack <RomFS> <out> <replacements.tsv> <chunk-archive>")
+        die("usage: casc_overlay.py [--link-mode auto|symlink|hardlink|copy] <RomFS> <output-dir> <replacements.tsv> [--prebuilt pack_index.tsv] | pack <RomFS> <out> <replacements.tsv> <chunk-archive>")
     make_overlay(Path(argv[1]).resolve(), Path(argv[2]).resolve(), read_replacements(argv[3]), prebuilt)
 
 

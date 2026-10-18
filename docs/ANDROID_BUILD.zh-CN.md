@@ -39,6 +39,8 @@ python dm/android/tools/build_shaders.py   ~/dm-work/data/switch/3.3.94012/Updat
 
 这里的64对应本次已验证设备配置，其他GPU必须核对实际能力。转换结果在输出目录的 `spirv/`。工具也支持 `--dotnet` / `--translator` 指定环境；详细参数由 `--help` 查看。
 
+Mali 这类不支持 BC 的设备用 `--host-subgroup-size 16`，并另做 ASTC 数据包，步骤见 [Android ASTC 数据包](ANDROID_ASTC_PACK.zh-CN.md)。
+
 ## 构建与安装
 
 首次在干净源码目录构建前，需要从本地 RomFS 生成仓库、经验和场景光照表。激活上述 Python 虚拟环境后运行（`ROMFS` 指向自己的资源目录）：
