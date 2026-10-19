@@ -10,9 +10,16 @@ root = Path(__file__).resolve().parents[1]
 out = Path(sys.argv[1]).resolve()
 toolchain = Path(sys.argv[2])
 out.mkdir(parents=True, exist_ok=True)
-clang = toolchain / "aarch64-linux-android29-clang"
-subprocess.run([str(clang), "-c", str(root / "tests/probe.S"), "-o", str(out / "probe.o")], check=True)
-subprocess.run([str(toolchain / "llvm-objcopy"), "-O", "binary", "--only-section=.text", str(out / "probe.o"), str(out / "probe.code")], check=True)
+if os.name == "nt":
+    clang = toolchain / "clang.exe"
+    objcopy = toolchain / "llvm-objcopy.exe"
+    target = ["--target=aarch64-linux-android29", "--sysroot", str(toolchain.parent / "sysroot"), "-fno-emulated-tls"]
+else:
+    clang = toolchain / "aarch64-linux-android29-clang"
+    objcopy = toolchain / "llvm-objcopy"
+    target = []
+subprocess.run([str(clang), *target, "-c", str(root / "tests/probe.S"), "-o", str(out / "probe.o")], check=True)
+subprocess.run([str(objcopy), "-O", "binary", "--only-section=.text", str(out / "probe.o"), str(out / "probe.code")], check=True)
 code = (struct.pack("<II", 0x14000002, 0x4000) + (out / "probe.code").read_bytes()).ljust(0x1000, b"\0")
 ro = bytearray(0x100)
 ro[:4] = b"MOD0"

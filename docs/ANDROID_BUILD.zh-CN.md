@@ -4,7 +4,7 @@ English: [README.md](ANDROID_BUILD.md)。实际状态见[源码冻结说明](AND
 
 ## 环境
 
-构建脚本当前面向 Linux x86_64，使用 Android NDK r28c、API35平台/构建工具和 JDK，无需 Gradle。工具默认安装至 `~/dm-work/tools/android`，可用 `DM_ANDROID_TOOLS` 指定。
+构建脚本支持 Linux x86_64 和 Windows x86_64，使用 Android NDK、平台/构建工具和 JDK，无需 Gradle。工具可以是旧版扁平目录（`DM_ANDROID_TOOLS` 指向含 `ndk/ jdk/ platform/ build-tools/ platform-tools/` 的目录），也可以直接指向普通 Android SDK（脚本自动选择 `ndk/<版本>`、`platforms/android-*`、`build-tools/<版本>` 中的最高版本）。Windows 需要 JDK 9+（JDK 11 已验证）和 build-tools 35+（`zipalign -P 16` 需要）。
 
 ```bash
 python3 dm/android/tools/bootstrap.py
@@ -14,6 +14,15 @@ python -m pip install lz4 capstone unicorn numpy pillow zstandard nsz
 ```
 
 工具首次下载需要网络。游戏内容、提取工具及 .NET 着色器翻译环境需自行准备，仓库不是开箱即玩的游戏发行包。已有测试/诊断代码仍随源码保留；此次整理不要求执行测试。
+
+Windows 不需要 `bootstrap.py`：装好 Android Studio/SDK 和 JDK 11 后设置环境变量即可（路径按本机修改）：
+
+```powershell
+$env:DM_ANDROID_TOOLS = "D:\Android\SDK"
+$env:DM_JDK = "C:\Program Files\Java\jdk-11.0.14"
+```
+
+工具链脚本会自动识别 SDK 里的 NDK、platforms 和 build-tools 版本；Linux 仍可使用上面的 `bootstrap.py` 扁平目录。
 
 ## 准备游戏模块和着色器
 
@@ -52,11 +61,25 @@ make -C dm/host dm_vault_tab.h dm_hud_exp.h dm_bright_levels.inc \
 
 这些生成文件被 Git 忽略，不随源码发布。更换游戏资源后需删除这三个生成文件，再运行上面的命令重新生成。
 
+使用已经在手机端导入的数据包时，**不要**把游戏模块再打进 APK；数据包的 `game/` 已经包含 `libdmguest_main/sdk/subsdk0.so`。只构建宿主与前端：
+
 ```bash
-python dm/android/tools/build.py --game-run   --game-source ~/dm-work/build/android/game   --shader-cache ~/dm-work/build/android/shaders/spirv
+python dm/android/tools/build.py --game-run --shader-cache dm-work/build/android/shaders/spirv --no-turnip
 ```
 
-输出 `dm/android/build/D2R-Android-port.apk`，包名 `org.d2r.android.port`。真实游戏APK包含本机派生的游戏模块，不随源码发布。
+输出 `dm/android/build/D2R-Android-port.apk`，包名 `org.d2r.android.port`。`--no-turnip` 适用于 Mali 系统驱动；需要内置 Turnip 的 Adreno 包按下面的 Linux 说明构建。
+
+只有要出“单个 APK 自带游戏代码”的包时才加 `--game-source`，这会再嵌一份游戏模块（约 79 MB），不能和导入的数据包同时使用：
+
+```bash
+python dm/android/tools/build.py --game-run \
+  --game-source ~/dm-work/build/android/game \
+  --shader-cache ~/dm-work/build/android/shaders/spirv
+```
+
+工作区放在仓库内时把 `~/dm-work` 换成 `dm-work`。
+
+签名默认用 `dm/android/build/debug.keystore`；该文件不存在但 `dm-work/build/android/debug.keystore` 存在时会自动复制，保持与旧包同一签名，也可用 `--keystore` 指定。Windows 默认跳过 adrenotools GPU driver 和 GPU 诊断 fixtures（它们是 Linux 构建输入，Mali 用系统驱动）；Linux 可加 `--no-gpu-extras` 显式跳过。需要内置 Turnip 的 Adreno 包仍应在 Linux 上构建 GPU driver 部分；Windows 的 Mali 包用 `--no-turnip` 或系统驱动。
 
 ```bash
 export ANDROID_SERIAL='你的设备序列号'
@@ -68,6 +91,8 @@ adb -s "$ANDROID_SERIAL" shell am start -n org.d2r.android.port/.LauncherActivit
 ```
 
 RomFS和着色器仅首次或资源版本变化时部署；更新APK保留应用数据。首次无存档会进入建角界面。存档位于应用私有 `files/save/`，不要用其他设备存档覆盖现有角色。驱动与启动配置见[驱动说明](ANDROID_GPU_DRIVER.zh-CN.md)和[启动设置](ANDROID_LAUNCH_SETTINGS.zh-CN.md)。
+
+也可以构建后运行 `python dm/android/tools/install_apk.py`：默认安装 `dm/android/build/D2R-Android-port.apk`，处理 vivo 安全守护安装弹窗，并用双端 MD5 核对设备上装的是本次产物；也可以把别的 APK 路径作为参数传入。
 
 ## 自动流水线（GitHub Actions）
 

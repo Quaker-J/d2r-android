@@ -11,23 +11,22 @@ import shlex
 import argparse
 
 ROOT = Path(__file__).resolve().parents[2]
-TOOLS = Path(os.environ.get("DM_ANDROID_TOOLS", str(Path.home() / "dm-work/tools/android")))
+import android_toolchain as tc
 OUT = ROOT / "android/build/host"
-CLANG = TOOLS / "ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang"
 
 
 def compile(item):
     source, extra = item
     obj = OUT / (source.stem + ".o")
     deps, stamp = obj.with_suffix(".d"), obj.with_suffix(".cmd")
-    command = [str(CLANG), "-c", "-fPIC", "-O3", "-fno-strict-aliasing", "-fno-omit-frame-pointer", "-g", "-MMD", "-MF", str(deps), "-D_GNU_SOURCE", "-I", str(ROOT / "host"),
+    command = [*tc.clang_argv(), "-c", "-fPIC", "-O3", "-fno-strict-aliasing", "-fno-omit-frame-pointer", "-g", "-MMD", "-MF", str(deps), "-D_GNU_SOURCE", "-I", str(ROOT / "host"),
                "-I", str(ROOT / "android/native"), "-I", str(ROOT / "gfx/nvn/include"), "-I", str(ROOT / "android/native/compat"), "-I", str(ROOT / "android/build/gpu-driver/include")]
     if source.parent == ROOT / "host" or source.parent == ROOT / "gfx/nvn": command += ["-include", str(ROOT / "android/native/compat/host_preinclude.h")]
     if source.name == "main.c": command += ["-Dmain=dm_main"]
     command += extra + [str(source), "-o", str(obj)]
     recorded = repr(command)
     if obj.exists() and deps.exists() and stamp.exists() and stamp.read_text() == recorded:
-        dependencies = shlex.split(deps.read_text().split(":", 1)[1].replace("\\\n", " "))
+        dependencies = shlex.split(deps.read_text().split(":", 1)[1].replace("\\\n", " "), posix=os.name != "nt")
         if all(Path(p).exists() and Path(p).stat().st_mtime <= obj.stat().st_mtime for p in dependencies): return obj
     r = subprocess.run(command, capture_output=True, text=True)
     (OUT / (source.stem + ".log")).write_text(r.stdout + r.stderr)
@@ -42,7 +41,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.activity: OUT = ROOT / "android/build/game-host"
     OUT.mkdir(parents=True, exist_ok=True)
-    subprocess.run([sys.executable,str(ROOT / "android/tools/build_gpu_driver.py")],check=True)
+    if os.name != "nt" and not (ROOT / "android/build/gpu-driver/include").is_dir():
+        subprocess.run([sys.executable, str(ROOT / "android/tools/build_gpu_driver.py")], check=True)
     entry = OUT / "entry_elf.S"
     subprocess.run([sys.executable, str(ROOT / "android/tools/generate_entry.py"), str(entry)], check=True)
     subprocess.run([sys.executable, str(ROOT / "android/tools/generate_nvn.py"), str(OUT)], check=True)
@@ -60,7 +60,7 @@ if __name__ == "__main__":
     if any(obj is None for obj in objects): sys.exit(1)
     output = OUT / ("libdmandroid.so" if args.activity else "dmhost-android")
     link_flags = ["-shared", "-Wl,-z,defs"] if args.activity else []
-    result = subprocess.run([str(CLANG), "-Wl,-z,max-page-size=16384", *map(str, objects), *link_flags, "-landroid", "-llog", "-laaudio", "-ldl", "-lm", "-o", str(output)], capture_output=True, text=True)
+    result = subprocess.run([*tc.clang_argv(), "-Wl,-z,max-page-size=16384", *map(str, objects), *link_flags, "-landroid", "-llog", "-laaudio", "-ldl", "-lm", "-o", str(output)], capture_output=True, text=True)
     (OUT / "link.log").write_text(result.stdout + result.stderr)
     if result.returncode:
         print("Link failed; see", OUT / "link.log", "\n" + result.stderr[:6000]); sys.exit(1)

@@ -13,8 +13,8 @@ import sys
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-TOOLS = Path(os.environ.get("DM_ANDROID_TOOLS", str(Path.home() / "dm-work/tools/android")))
-BIN = TOOLS / "ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+REPO = ROOT.parents[1]
+import android_toolchain as tc
 
 GAME_ACTIVITY = "org.d2r.android.port.D2RActivity"
 LAUNCHER_NAME = "org.d2r.android.port.LauncherActivity"
@@ -56,7 +56,7 @@ def build_counter_timestamp(build):
     # 生产辅助着色器每次构建从GLSL生成，独立于游戏缓存。
     # Generate the production helper from GLSL independently of the game cache.
     output = build / "counter_timestamp.spv"
-    run([TOOLS / "ndk/shader-tools/linux-x86_64/glslc", "--target-env=vulkan1.1", "-O",
+    run([tc.glslc(), "--target-env=vulkan1.1", "-O",
          ROOT / "native/shaders/counter_timestamp.comp", "-o", output])
     data = output.read_bytes()
     words = struct.unpack("<" + "I" * (len(data) // 4), data)
@@ -97,19 +97,28 @@ def version_code(version):
 
 
 def main():
+    local_shader_cache = REPO / "dm-work/build/android/shaders/spirv"
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--install", action="store_true")
-    parser.add_argument("--game-source", type=Path, help="Local rewritten Android game modules (includes game code in APK)")
+    parser.add_argument("--game-source", type=Path,
+                        help="Local rewritten Android game modules: embeds a second copy in the APK; omit when the imported data package already provides game/")
     parser.add_argument("--game-run", action="store_true", help="Run the real game host with NVN/Vulkan instead of the diagnostic frontend")
-    parser.add_argument("--shader-cache", type=Path, default=Path.home() / "dm-work/build/android/shaders/spirv")
+    parser.add_argument("--shader-cache", type=Path,
+                        default=local_shader_cache if local_shader_cache.is_dir() else Path.home() / "dm-work/build/android/shaders/spirv")
     parser.add_argument("--version", default="dev",
                         help="写进 APK 的版本：发布用 tag 名（v0.3），分支构建用 main-<短提交>；默认 dev")
     parser.add_argument("--turnip", type=Path, default=ROOT / "prebuilt/turnip/vulkan.purple.so",
                         help="随 APK 分发的 Turnip 驱动；默认用仓库里的 dm/android/prebuilt/turnip/")
     parser.add_argument("--no-turnip", action="store_true",
                         help="不出内置驱动（只出通用包，启动界面里那一项会自己隐藏）")
+    parser.add_argument("--keystore", type=Path, default=ROOT / "build/debug.keystore",
+                        help="签名 keystore；默认 dm/android/build/debug.keystore")
+    parser.add_argument("--no-gpu-extras", action="store_true",
+                        help="跳过 adrenotools GPU driver 和 GPU 诊断 fixtures")
     args = parser.parse_args()
     if args.game_source and not args.game_run: parser.error("--game-source only makes sense with --game-run")
+    if args.game_source:
+        print("Game modules: embedding a second copy in the APK; omit --game-source when using an imported package", flush=True)
     if args.game_run and not args.game_source:
         # 没有游戏源码也照样出 APK：宿主与前端完整，**游戏模块由手机端导入的数据包提供**（启动界面本来就要
         # 先导入才能启动）。CI 用它产出可下载的通用 APK；本机带 --game-source 时照旧把游戏代码打进包里。
@@ -120,9 +129,9 @@ def main():
     build = ROOT / "build"
     build.mkdir(exist_ok=True)
     if args.game_run: build_counter_timestamp(build)
-    for required in [BIN / "aarch64-linux-android29-clang", TOOLS / "jdk/bin/java", TOOLS / "platform/android.jar"]:
-        if not required.exists(): sys.exit("Missing tool: " + str(required) + "; run tools/bootstrap.py")
-    env = dict(os.environ, JAVA_HOME=str(TOOLS / "jdk"), PATH=str(TOOLS / "jdk/bin") + os.pathsep + os.environ["PATH"])
+    for required in [Path(tc.clang_argv()[0]), tc.java(), tc.android_jar()]:
+        if not required.is_file(): sys.exit("Missing tool: " + str(required) + "; set DM_ANDROID_TOOLS/ANDROID_HOME, DM_JDK/JAVA_HOME")
+    env = dict(os.environ, JAVA_HOME=str(tc.jdk_home()), PATH=str(tc.jdk_home() / "bin") + os.pathsep + os.environ["PATH"])
     entry = build / "entry_elf.S"
     run([sys.executable, ROOT / "tools/generate_entry.py", entry])
     run([sys.executable, ROOT / "tools/strings.py", build])
@@ -151,11 +160,15 @@ def main():
         # A bitmap has no clean monochrome silhouette, so the override ships no themed layer (Android 13 falls back
         # to the colour icon).
         shutil.rmtree(build / "res" / "mipmap-anydpi-v33", ignore_errors=True)
-    run([sys.executable, ROOT / "tools/make_probe.py", build / "probe", BIN])
-    run([sys.executable, ROOT / "tools/build_gpu_driver.py"])
-    run([sys.executable, ROOT / "tools/build_gpu_fixtures.py"])
-    compiler = BIN / "aarch64-linux-android29-clang"
-    common = [compiler, "-O1", "-g", "-Wall", "-Wextra", "-I", ROOT / "native", "-I", build, "-I", build / "gpu-driver/include", ROOT / "native/runtime.c", ROOT / "native/probe.c", entry]
+    run([sys.executable, ROOT / "tools/make_probe.py", build / "probe", tc.ndk_bin()])
+    if args.no_gpu_extras:
+        print("GPU driver/fixtures: skipped (--no-gpu-extras)", flush=True)
+    elif os.name == "nt":
+        print("GPU driver/fixtures: skipped on Windows (Linux-only build inputs); system driver only", flush=True)
+    else:
+        run([sys.executable, ROOT / "tools/build_gpu_driver.py"])
+        run([sys.executable, ROOT / "tools/build_gpu_fixtures.py"])
+    common = [*tc.clang_argv(), "-O1", "-g", "-Wall", "-Wextra", "-I", ROOT / "native", "-I", build, "-I", build / "gpu-driver/include", ROOT / "native/runtime.c", ROOT / "native/probe.c", entry]
     run(common + ["-ldl", "-o", build / "runtime-smoke"])
     if args.game_run:
         run([sys.executable, ROOT / "tools/host_link.py", "--activity"])
@@ -196,7 +209,8 @@ def main():
     else: print("Turnip driver: not present at " + str(args.turnip) + "; generic package only", flush=True)
     # 诊断GLSL缓存独立于游戏的离线Maxwell fullshader缓存，不覆盖游戏资源。
     # Keep diagnostic GLSL shaders separate from the game's offline Maxwell fullshader cache.
-    shutil.copytree(build / "gpu-test-shaders", assets / "gpu-test-shaders", dirs_exist_ok=True)
+    if (build / "gpu-test-shaders").is_dir():
+        shutil.copytree(build / "gpu-test-shaders", assets / "gpu-test-shaders", dirs_exist_ok=True)
     for name in ["probe.fixups.tsv", "probe.gates.tsv"]:
         shutil.copyfile(build / "probe" / name, assets / name)
     if args.game_source:
@@ -214,9 +228,9 @@ def main():
         classes, dex = build / "java-classes", build / "dex"
         if classes.exists(): shutil.rmtree(classes)
         classes.mkdir(); dex.mkdir(exist_ok=True)
-        run([TOOLS / "jdk/bin/javac", "--release", "8", "-classpath", TOOLS / "platform/android.jar", "-d", classes,
+        run([tc.javac(), "--release", "8", "-encoding", "UTF-8", "-classpath", tc.android_jar(), "-d", classes,
              *sorted((ROOT / "java").rglob("*.java"))])
-        run([TOOLS / "build-tools/d8", "--min-api", "29", "--lib", TOOLS / "platform/android.jar", "--output", dex,
+        run([tc.d8(), "--min-api", "29", "--lib", tc.android_jar(), "--output", dex,
              *sorted(classes.rglob("*.class"))], env=env)
         activity = LAUNCHER_NAME
         manifest = build / "game-AndroidManifest.xml"
@@ -237,9 +251,9 @@ def main():
                                    LAUNCHER_ACTIVITY_BLOCK + GAME_ACTIVITY_BLOCK, source, count=1, flags=re.S)
         if replaced != 1: sys.exit("game manifest: expected exactly one NativeActivity activity block")
         manifest.write_text(source)
-    run([TOOLS / "build-tools/aapt2", "compile", "--dir", build / "res", "-o", build / "resources.zip"])
-    run([TOOLS / "build-tools/aapt2", "link", "--manifest", manifest,
-         "-I", TOOLS / "platform/android.jar", "-A", assets, "-o", unsigned, build / "resources.zip"])
+    run([tc.aapt2(), "compile", "--dir", build / "res", "-o", build / "resources.zip"])
+    run([tc.aapt2(), "link", "--manifest", manifest,
+         "-I", tc.android_jar(), "-A", assets, "-o", unsigned, build / "resources.zip"])
     with zipfile.ZipFile(unsigned, "a", compression=zipfile.ZIP_STORED) as z:
         if args.game_run: z.write(dex / "classes.dex", "classes.dex")
         z.write(build / "libdmandroid.so", "lib/arm64-v8a/libdmandroid.so")
@@ -252,24 +266,30 @@ def main():
             for name in ["main", "sdk", "subsdk0"]:
                 z.write(args.game_source / ("libdmguest_" + name + ".so"), "lib/arm64-v8a/libdmguest_" + name + ".so")
     aligned = build / "aligned.apk"
-    run([TOOLS / "build-tools/zipalign", "-f", "-P", "16", "4", unsigned, aligned])
-    keystore = TOOLS / "debug.keystore"
+    run([tc.zipalign(), "-f", "-P", "16", "4", unsigned, aligned])
+    keystore = args.keystore
+    keystore.parent.mkdir(parents=True, exist_ok=True)
     if not keystore.exists():
-        run([TOOLS / "jdk/bin/keytool", "-genkeypair", "-keystore", keystore, "-storepass", "android", "-keypass", "android",
+        for legacy in (REPO / "dm-work/build/android/debug.keystore", tc.sdk_root() / "debug.keystore"):
+            if legacy.is_file():
+                shutil.copyfile(legacy, keystore)
+                break
+    if not keystore.exists():
+        run([tc.keytool(), "-genkeypair", "-keystore", keystore, "-storepass", "android", "-keypass", "android",
              "-alias", "androiddebugkey", "-keyalg", "RSA", "-keysize", "2048", "-validity", "10000",
              "-dname", "CN=Android Debug,O=Android,C=US"], env=env)
     apk = build / "D2R-Android-port.apk"
-    run([TOOLS / "build-tools/apksigner", "sign", "--ks", keystore, "--ks-pass", "pass:android", "--key-pass", "pass:android",
+    run([tc.apksigner(), "sign", "--ks", keystore, "--ks-pass", "pass:android", "--key-pass", "pass:android",
          "--out", apk, aligned], env=env)
-    run([TOOLS / "build-tools/apksigner", "verify", apk], env=env)
+    run([tc.apksigner(), "verify", apk], env=env)
     print("APK:", apk)
     if args.install:
-        run([TOOLS / "platform-tools/adb", "install", "-r", apk])
+        run([tc.adb(), "install", "-r", apk])
         if args.game_run:
             if not args.shader_cache.is_dir(): sys.exit("Missing shader cache: " + str(args.shader_cache))
-            run([TOOLS / "platform-tools/adb", "shell", "mkdir", "-p", "/sdcard/Android/data/org.d2r.android.port/files/shaders"])
-            run([TOOLS / "platform-tools/adb", "push", "--sync", str(args.shader_cache) + "/.", "/sdcard/Android/data/org.d2r.android.port/files/shaders/"])
-        run([TOOLS / "platform-tools/adb", "shell", "am", "start", "-n", "org.d2r.android.port/" + activity])
+            run([tc.adb(), "shell", "mkdir", "-p", "/sdcard/Android/data/org.d2r.android.port/files/shaders"])
+            run([tc.adb(), "push", "--sync", str(args.shader_cache) + "/.", "/sdcard/Android/data/org.d2r.android.port/files/shaders/"])
+        run([tc.adb(), "shell", "am", "start", "-n", "org.d2r.android.port/" + activity])
 
 
 if __name__ == "__main__":
