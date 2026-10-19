@@ -359,14 +359,16 @@ static int astc_copy_init(void) {
     VK_CHECK(vkCreatePipelineLayout(device,&pl,NULL,&astc_copy_layout));
     VkComputePipelineCreateInfo cp={.sType=VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
         .stage={.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,.stage=VK_SHADER_STAGE_COMPUTE_BIT,.module=module,.pName="main"},.layout=astc_copy_layout};
-    VK_CHECK(vkCreateComputePipelines(device,VK_NULL_HANDLE,1,&cp,NULL,&astc_copy_pipe));
+    uint64_t pipeline_begin=dm_android_clock_ns(CLOCK_MONOTONIC);
+    VK_CHECK(pipeline_create_compute(&cp,&astc_copy_pipe));
+    uint64_t pipeline_wall=dm_android_clock_ns(CLOCK_MONOTONIC)-pipeline_begin;
     VkSamplerCreateInfo si={.sType=VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,.magFilter=VK_FILTER_NEAREST,.minFilter=VK_FILTER_NEAREST,
         .mipmapMode=VK_SAMPLER_MIPMAP_MODE_NEAREST,.addressModeU=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
         .addressModeV=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,.addressModeW=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE};
     VK_CHECK(vkCreateSampler(device,&si,NULL,&astc_copy_sampler));
     vkDestroyShaderModule(device,module,NULL);
     astc_copy_state=1;
-    LOG("[vulkan] astc_to_rgba_copy pipeline=ready");
+    LOG("[vulkan] astc_to_rgba_copy pipeline=ready create_wall_ms=%.3f",pipeline_wall/1e6);
     return 1;
 }
 static int astc_temp_get(uint32_t w,uint32_t h,int *created) {

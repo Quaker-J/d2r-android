@@ -282,6 +282,10 @@ void mtl_screen_attach(struct ANativeWindow *window) {
 }
 #endif
 
+// ASTC 拷贝管线启动时预建：惰性首次创建会与 PSO 预热抢缓存锁，并且落在游戏帧里。
+// Pre-create the ASTC copy pipeline at startup: lazy first use would contend with PSO warm-up for the cache lock and land in a game frame.
+static int astc_copy_init(void);
+
 static void initialize(void) {
     // 与原 NVN 后端使用相同默认状态；显式指令随后覆盖，不能改写合法深度范围。
     // Match the original NVN defaults; explicit commands override them without rewriting legal depth ranges.
@@ -401,6 +405,11 @@ driver_retry:;
     VK_CHECK(vkAllocateCommandBuffers(device, &ai, &command));
     VkFenceCreateInfo fi = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO}; VK_CHECK(vkCreateFence(device, &fi, NULL, &gpu_fence));
     pipeline_cache_initialize(&properties);
+    // 仅在无 BC、依赖 ASTC 补充包的设备上预建拷贝管线：驱动编译落在启动阶段并进入本次管线缓存快照；
+    // 支持 BC 的设备可能根本用不到它，保持惰性创建。
+    // Pre-create the ASTC copy pipeline only on BC-less devices that rely on the ASTC pack: the driver compile happens at
+    // start-up and enters this session's cache snapshot; BC-capable devices may never use it, so keep creation lazy.
+    if(gpu_texture_compression_astc&&!gpu_texture_compression_bc)astc_copy_init();
     VkQueryPoolCreateInfo qci={.sType=VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,.queryType=VK_QUERY_TYPE_OCCLUSION,.queryCount=1024};VK_CHECK(vkCreateQueryPool(device,&qci,NULL,&draw_queries));
     if(gpu_timestamp_bits&&properties.limits.timestampPeriod>0){
         gpu_timestamp_period=properties.limits.timestampPeriod;qci.queryType=VK_QUERY_TYPE_TIMESTAMP;qci.queryCount=2;
