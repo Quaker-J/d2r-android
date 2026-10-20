@@ -8,3 +8,4 @@ gfx/tools/dmsh_xlate/obj/
 gfx/tools/dmsh_xlate/bin/
 third_party/ryujinx/**/obj/
 third_party/ryujinx/**/bin/
+dm/tools/astcenc

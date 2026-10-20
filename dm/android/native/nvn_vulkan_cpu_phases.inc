@@ -61,7 +61,12 @@ static void dm_abnormal_open(void) {
     char path[1024];
     int written = snprintf(path, sizeof path, "%s/abnormal-frames.log", directory);
     if (written < 0 || (size_t)written >= sizeof path) { dm_abnormal_failed = 1; return; }
-    dm_abnormal_file = fopen(path, "a");
+    // 每次启动截断重写，与 game-startup.log 同一约定：这台机器几乎帧帧超线，追加写会涨到几十 MB，
+    // 而这份文件正是被测线程每帧在写的，体积本身会变成取证成本。
+    // Truncate on every start, the same convention as game-startup.log: on this device nearly every frame is over
+    // the threshold, so appending grows the file to tens of megabytes -- and the thread being measured is the one
+    // writing it, so its size is itself part of the evidence-gathering cost.
+    dm_abnormal_file = fopen(path, "w");
     if (!dm_abnormal_file) { dm_abnormal_failed = 1; return; }
     fprintf(dm_abnormal_file, "# 异常帧日志：帧间隔或线程 CPU 达到 %d ms 才记一行；分段是该帧自身的耗时\n",
             DM_ABNORMAL_INTERVAL_NS / 1000000);

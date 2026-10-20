@@ -103,6 +103,7 @@ typedef struct post_op {
     struct post_op *next,*copy_next;
 } post_op;
 static int counter_gpu_record(post_op *post);
+static void counter_gpu_initialize(void);
 static VkInstance instance;
 static VkPhysicalDevice physical;
 static VkDevice device;
@@ -415,6 +416,12 @@ driver_retry:;
         gpu_timestamp_period=properties.limits.timestampPeriod;qci.queryType=VK_QUERY_TYPE_TIMESTAMP;qci.queryCount=2;
         VK_CHECK(vkCreateQueryPool(device,&qci,NULL,&batch_times));
         LOG("[vulkan] GPU timestamps bits=%u period=%.6f ns",gpu_timestamp_bits,gpu_timestamp_period);
+        // 与 ASTC 拷贝管线同例：在设备初始化期建好计数报告对象，让驱动编译落在启动阶段并进入本次管线缓存；
+        // 留给首次计数使用会撞上 PSO 预热线程的同类创建，并把一次性创建塞进游戏中的某一帧。
+        // Same convention as the ASTC copy pipeline: build the counter report objects during device initialization so the
+        // driver compile happens at start-up and enters this session's cache. Leaving it to first counter use would race
+        // the PSO warm thread creating the same object classes and put a one-time creation inside a gameplay frame.
+        counter_gpu_initialize();
     }
     if (surface) {
 #ifdef __ANDROID__

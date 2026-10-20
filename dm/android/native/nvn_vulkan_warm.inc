@@ -74,7 +74,28 @@ static int pso_user_file(void) {
         char header[80];int n=snprintf(header,sizeof header,"# DMVKRPSO1 pass=%zu key=%zu\n",sizeof(graphics_pass_key),sizeof(pipeline_key));
         if(n<=0||(size_t)n>=sizeof header||!pipeline_disk_transfer(fd,header,(size_t)n,1)){close(fd);return -1;}
         pso_user_bytes=(uint64_t)n;
+    } else {
+        // 结构体大小写进表头，读取端按它拒绝不匹配的记录。头只在空文件时写过，所以键布局一变
+        // （这次 graphics_pass_key 加了 layout[9]）旧文件就永久读不出可用记录，而新记录还在往旧头后面追加。
+        // 这里比对表头，不一致就整份作废重写：记录本身已不可用，留着只会静默关掉预热。
+        // The header records the struct sizes and the reader rejects mismatching records. The header was only ever
+        // written for an empty file, so as soon as the key layout changes (here graphics_pass_key gained layout[9]) an
+        // existing file yields no usable records while new ones keep being appended under the stale header. Compare
+        // the header and rewrite the whole file when it disagrees: the old records are already unusable, and keeping
+        // them only switches warm-up off silently.
+        char head[128]={0};ssize_t got=pread(fd,head,sizeof head-1,0);   // 用 pread：不移动偏移，后面的 O_APPEND 追加照旧
+        unsigned long recorded_pass=0,recorded_key=0;
+        if(got>0&&sscanf(head,"# DMVKRPSO1 pass=%lu key=%lu",&recorded_pass,&recorded_key)==2
+           &&recorded_pass==(unsigned long)sizeof(graphics_pass_key)&&recorded_key==(unsigned long)sizeof(pipeline_key))goto header_ok;
+        if(ftruncate(fd,0)){close(fd);return -1;}
+        char fresh[80];int n=snprintf(fresh,sizeof fresh,"# DMVKRPSO1 pass=%zu key=%zu\n",sizeof(graphics_pass_key),sizeof(pipeline_key));
+        if(n<=0||(size_t)n>=sizeof fresh||!pipeline_disk_transfer(fd,fresh,(size_t)n,0)){close(fd);return -1;}
+        pso_user_bytes=(uint64_t)n;
+        LOG("[vulkan-pso] user_manifest 表头与当前键布局不符，整份作废重写 pass=%zu/%zu key=%zu/%zu",sizeof(graphics_pass_key),recorded_pass,sizeof(pipeline_key),recorded_key);
+        goto done;
     }
+header_ok:
+done:
     pso_user_fd=fd;return fd;
 }
 static void pso_record_graphics(const shader_entry *vs,const shader_entry *fs,const graphics_pass_key *pass,const pipeline_key *key) {
@@ -161,9 +182,17 @@ static int pso_warm_one(const pso_record *record) {
     else{fs=shader_load_by_key(record->fs,0,0);if(!fs)return 0;}
     // 与运行期同一套 pass/layout 缓存：预热对象直接成为游戏线程首次命中的对象。
     // The same pass/layout caches as the runtime: warmed objects are exactly what the game thread hits first.
+    // 预热通道从键里取布局：运行期是按真实图像算出来的，键已经把布局当成身份的一部分。
+    // The warm pass takes its layouts from the key: the runtime derives them from the real image, and the key now
+    // treats layout as part of the pass identity.
     VkAttachmentDescription attachments[9]={0};VkAttachmentReference colors[8]={0},depth={VK_ATTACHMENT_UNUSED,VK_IMAGE_LAYOUT_GENERAL};
-    for(unsigned i=0;i<pass_key->attachments;i++)attachments[i]=(VkAttachmentDescription){.format=pass_key->formats[i],.samples=VK_SAMPLE_COUNT_1_BIT,.loadOp=pass_key->load[i],.storeOp=VK_ATTACHMENT_STORE_OP_STORE,.stencilLoadOp=pass_key->stencil_load[i],.stencilStoreOp=i==pass_key->depth?VK_ATTACHMENT_STORE_OP_STORE:VK_ATTACHMENT_STORE_OP_DONT_CARE,.initialLayout=VK_IMAGE_LAYOUT_GENERAL,.finalLayout=VK_IMAGE_LAYOUT_GENERAL};
-    for(unsigned i=0;i<pass_key->colors;i++)colors[i]=(VkAttachmentReference){pass_key->color_indices[i],VK_IMAGE_LAYOUT_GENERAL};
+    for(unsigned i=0;i<pass_key->attachments;i++)attachments[i]=(VkAttachmentDescription){.format=pass_key->formats[i],.samples=VK_SAMPLE_COUNT_1_BIT,.loadOp=pass_key->load[i],.storeOp=VK_ATTACHMENT_STORE_OP_STORE,.stencilLoadOp=pass_key->stencil_load[i],.stencilStoreOp=i==pass_key->depth?VK_ATTACHMENT_STORE_OP_STORE:VK_ATTACHMENT_STORE_OP_DONT_CARE,.initialLayout=(VkImageLayout)pass_key->layout[i],.finalLayout=(VkImageLayout)pass_key->layout[i]};
+    // color_indices[i] 可以是 VK_ATTACHMENT_UNUSED（稀疏渲染目标：某个 color 槽为 NULL），直接拿它下标
+    // layout[] 就是越界读，预热线程会当场段错误。与上面 depth 的守卫同一要求。
+    // color_indices[i] may be VK_ATTACHMENT_UNUSED for a sparse render target (a null color slot); indexing
+    // layout[] with it reads out of bounds and segfaults the warm thread. Same guard the depth case needs.
+    for(unsigned i=0;i<pass_key->colors;i++)colors[i]=(VkAttachmentReference){pass_key->color_indices[i],pass_key->color_indices[i]<pass_key->attachments?(VkImageLayout)pass_key->layout[pass_key->color_indices[i]]:VK_IMAGE_LAYOUT_GENERAL};
+    if(pass_key->depth<pass_key->attachments)depth=(VkAttachmentReference){pass_key->depth,(VkImageLayout)pass_key->layout[pass_key->depth]};
     if(pass_key->depth!=VK_ATTACHMENT_UNUSED)depth.attachment=pass_key->depth;
     graphics_pass_entry *pass=graphics_pass_get(*pass_key,attachments,colors,depth,0);
     // 驱动拒绝这个通道（多半是记录里的附件格式在这个设备/驱动上不合法）：跳过这条记录，不打断整个预热。

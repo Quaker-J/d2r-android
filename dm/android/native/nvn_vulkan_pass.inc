@@ -28,6 +28,12 @@ static VkPipelineLayout graphics_layout_get(shader_entry *vs,shader_entry *fs) {
 }
 typedef struct {
     uint32_t attachments,colors,depth,color_indices[8];VkFormat formats[9];uint32_t load[9],stencil_load[9];
+    // 附件布局按真实图像算（深度格式即使被当颜色附件也留在 GENERAL），所以它现在是通道身份的一部分，
+    // 必须进键：否则同一份 formats 会在两种布局间复用同一个 VkRenderPass。
+    // Attachment layouts are now derived from the real image (a depth-format image stays GENERAL even if bound as
+    // a color target), so layout is part of the pass identity and must be in the key: otherwise one set of formats
+    // would reuse a single VkRenderPass across two different layouts.
+    uint32_t layout[9];
 } graphics_pass_key;
 typedef struct graphics_pass_entry { graphics_pass_key key;VkRenderPass pass;struct graphics_pass_entry *next; } graphics_pass_entry;
 static graphics_pass_entry *graphics_passes[256];
@@ -41,7 +47,7 @@ static graphics_frame_entry *graphics_frames[1024],*graphics_active_frame;
 static uint32_t graphics_active_query;
 static graphics_pass_key graphics_pass_key_make(unsigned count,unsigned ncolors,const VkAttachmentDescription *attachments,const VkAttachmentReference *colors,VkAttachmentReference depth) {
     graphics_pass_key key={.attachments=count,.colors=ncolors,.depth=depth.attachment};
-    for(unsigned i=0;i<count;i++){key.formats[i]=attachments[i].format;key.load[i]=attachments[i].loadOp;key.stencil_load[i]=attachments[i].stencilLoadOp;}
+    for(unsigned i=0;i<count;i++){key.formats[i]=attachments[i].format;key.load[i]=attachments[i].loadOp;key.stencil_load[i]=attachments[i].stencilLoadOp;key.layout[i]=attachments[i].initialLayout;}
     for(unsigned i=0;i<ncolors;i++)key.color_indices[i]=colors[i].attachment;return key;
 }
 static graphics_pass_entry *graphics_pass_get(graphics_pass_key key,const VkAttachmentDescription *attachments,const VkAttachmentReference *colors,VkAttachmentReference depth,int fatal) {
@@ -80,6 +86,7 @@ static int graphics_pass_matches(const graphics_pass_key *key,const VkImageView 
     // LOAD applies only at pass begin; an active pass may retain draws following its first DONT_CARE load.
     return frame->width==width&&frame->height==height&&active->attachments==key->attachments&&active->colors==key->colors&&active->depth==key->depth
         &&!memcmp(active->color_indices,key->color_indices,sizeof key->color_indices)&&!memcmp(active->formats,key->formats,sizeof key->formats)
+        &&!memcmp(active->layout,key->layout,sizeof key->layout)
         &&!memcmp(frame->views,views,key->attachments*sizeof *views);
 }
 static void graphics_pass_end(void) {
@@ -99,6 +106,9 @@ static void graphics_pass_begin(graphics_frame_entry *frame) {
 static void graphics_cache_forget_image(image_entry *image) {
     // 执行层已等待该图像的 GPU 使用结束；先销毁 framebuffer，再销毁它引用的 views。
     // The executor has waited for GPU image use; destroy framebuffers before their referenced views.
+    // 附件记忆表也一起作废：缓存里的 images/views 指针与该 serial 的对应关系到此不再成立。
+    // Invalidate the attachment memo too: the cached images/views pointers no longer correspond to that serial.
+    attachment_memo_invalidate();
     if(graphics_image_is_attachment(image))graphics_pass_end();
     for(unsigned bucket=0;bucket<1024;bucket++){
         graphics_frame_entry **link=&graphics_frames[bucket];

@@ -11,10 +11,19 @@ static void counter_gpu_initialize(void) {
     if(counter_gpu_initialized)return;counter_gpu_initialized=1;
     float period=(float)gpu_timestamp_period;uint32_t bits;memcpy(&bits,&period,sizeof bits);
     unsigned exponent=(bits>>23)&255,shift=exponent<=148?148-exponent:96;
-    // 精确 float32 周期转整数有理数；拒绝无法表示的范围，不能近似或截断高位。
-    // Decode the exact float32 period into an integer ratio; reject unsupported ranges rather than approximate or truncate high bits.
-    counter_gpu_supported=!(bits>>31)&&exponent&&exponent<=148&&shift<=95&&gpu_timestamp_bits&&gpu_timestamp_bits<=64&&gpu_timestamp_bits+26<=64+shift;
-    LOG("[vulkan-counter-gpu] supported=%d timestamp_bits=%u period_bits=%#x period_ns=%.9g CPU_fallback_keeps_wait=1",counter_gpu_supported,gpu_timestamp_bits,bits,(double)period);
+    // 精确 float32 周期转整数有理数；不近似、不丢中间位。
+    // Decode the exact float32 period into an integer ratio without approximation.
+    // 无损判据只看核函数算过的中间量：tick(<2^gpu_timestamp_bits) 乘 (3M<2^26) 必须留在 96 位乘积里，
+    // 长除 625 与右移 shift 随后精确执行；最终写入是 64 位报告字段，超出部分按硬件寄存器回绕丢弃，
+    // 与 CPU 回退用 uint64 算同一字段时的回绕语义一致。丢弃只在报告值达到 2^64 个 52.083 ns 计数单位时发生，
+    // 相当于连续运行三万年，不是可用范围内的近似。
+    // Exactness bounds the intermediate the kernel actually evaluates: tick(<2^bits) times (3M<2^26) must stay
+    // inside the 96-bit product, after which the base-65536 division by 625 and the right shift are exact. The final
+    // store is the 64-bit report field, whose overflow wraps exactly like the uint64 arithmetic of the CPU fallback;
+    // reaching that wrap needs 2^64 report units of 52.083 ns, i.e. tens of thousands of years of continuous runtime.
+    counter_gpu_supported=!(bits>>31)&&exponent&&exponent<=148&&shift<=95&&gpu_timestamp_bits&&gpu_timestamp_bits<=64
+        &&gpu_timestamp_bits+26<=96;
+    LOG("[vulkan-counter-gpu] supported=%d timestamp_bits=%u period_bits=%#x period_ns=%.9g product_bits=96 report_field=64bit_wrap CPU_fallback_keeps_wait=1",counter_gpu_supported,gpu_timestamp_bits,bits,(double)period);
     if(!counter_gpu_supported)return;
     counter_gpu_parameters[0]=((bits&0x7fffff)|0x800000)*3;
     counter_gpu_parameters[1]=shift;counter_gpu_parameters[2]=gpu_timestamp_bits;counter_gpu_parameters[3]=0;

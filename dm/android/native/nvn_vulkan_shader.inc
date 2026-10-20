@@ -190,13 +190,13 @@ static texture_descriptor descriptor_texture(int id) {
     texture_descriptor d={0};pthread_mutex_lock(&descriptor_lock);if(id>=0&&id<texture_capacity)d=texture_descriptors[id];pthread_mutex_unlock(&descriptor_lock);return d;
 }
 static image_entry *descriptor_image(const texture_descriptor *d,uint32_t type,int storage,VkPipelineStageFlags stage,VkAccessFlags access) {
-    if(d->valid){image_entry *e=image_get(&d->texture);if(!storage||(e->texture.has_layout&&e->texture.mem))image_upload(e);if(storage)image_gpu_written(e);image_access(e,stage,access);return e;}
+    if(d->valid){image_entry *e=image_get(&d->texture);if(!storage||(e->texture.has_layout&&e->texture.mem))image_upload(e);if(storage)image_gpu_written(e);image_access(e,stage,access);draw_sampled_note(e);return e;}
     // 未绑定采样资源保留零贴图；可写空槽用独立图像，防止计算输出污染后续采样。
     // Keep unbound sampled resources zero; separate writable images prevent compute output from polluting later samples.
     static tex_t dummy[2][32];unsigned index=(type&255)+(!!(type&256))*6+(!!(type&1024))*12;if(index>=32)die("Dummy texture type %u",type);
     tex_t *t=&dummy[!!storage][index];
     if(!t->serial){t->serial=UINT64_MAX-index-(!!storage)*32;t->d=(nvn_texdesc){.target=(type&255)==4?NVN_TEXTURE_TARGET_3D:(type&255)==5?NVN_TEXTURE_TARGET_CUBEMAP:(type&256)?NVN_TEXTURE_TARGET_2D_ARRAY:NVN_TEXTURE_TARGET_2D,.width=1,.height=1,.depth=(type&255)==5?6:1,.levels=1,.format=(type&1024)?NVN_FORMAT_DEPTH32F:NVN_FORMAT_RGBA8};nvn_tex_layout(&t->d,&t->L);}
-    image_entry *e=image_get(t);if(!e->populated){image_access(e,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);VkClearColorValue zero={0};VkImageSubresourceRange r={e->aspect,0,1,0,e->texture.L.layers};if(type&1024){VkClearDepthStencilValue depth={1,0};vkCmdClearDepthStencilImage(command,e->image,VK_IMAGE_LAYOUT_GENERAL,&depth,1,&r);}else vkCmdClearColorImage(command,e->image,VK_IMAGE_LAYOUT_GENERAL,&zero,1,&r);e->populated=1;}image_access(e,stage,access);return e;
+    image_entry *e=image_get(t);if(!e->populated){image_access(e,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);VkClearColorValue zero={0};VkImageSubresourceRange r={e->aspect,0,1,0,e->texture.L.layers};if(type&1024){VkClearDepthStencilValue depth={1,0};vkCmdClearDepthStencilImage(command,e->image,e->layout,&depth,1,&r);}else vkCmdClearColorImage(command,e->image,e->layout,&zero,1,&r);e->populated=1;}image_access(e,stage,access);draw_sampled_note(e);return e;
 }
 static VkImageView descriptor_view(const texture_descriptor *descriptor,image_entry *e,uint32_t type,int storage) {
     view_t v=descriptor->valid?descriptor->view:(view_t){0};
@@ -334,8 +334,19 @@ static VkDescriptorSet bind_shader(shader_entry *s,post_op *lifetime,uint32_t *d
                     VkAccessFlags access=VK_ACCESS_SHADER_READ_BIT;
                     // ImageStore 是位 2；保守保留读取权限，反射未单独标注 imageLoad。
                     // ImageStore is bit 2; conservatively retain reads because reflection does not separately flag imageLoad.
-                    if(b->kind==4&&(b->flags&4))access|=VK_ACCESS_SHADER_WRITE_BIT;
-                    image_entry *e=descriptor_image(&descriptor,b->type,b->kind==4,shader_pipeline_stage(s),access);images[j].imageView=descriptor_view(&descriptor,e,b->type,b->kind==4);}
+                    // 存储图像一律带写权限：反射只标了 imageLoad 的槽也可能被当只读绑上来，而 Storage Image 的
+                    // 合法布局只有 GENERAL（VUID-VkWriteDescriptorSet-descriptorType-04152），只给读会让
+                    // image_target_layout 选出 SHADER_READ_ONLY_OPTIMAL，描述符与屏障同时非法。
+                    // Storage images always carry write access: a slot reflection marked only imageLoad can still be
+                    // bound read-only, and GENERAL is the only legal layout for a Storage Image
+                    // (VUID-VkWriteDescriptorSet-descriptorType-04152), so a read-only request would make
+                    // image_target_layout pick SHADER_READ_ONLY_OPTIMAL and break both the descriptor and the barrier.
+                    if(b->kind==4&&vk_layout_enabled())access|=VK_ACCESS_SHADER_WRITE_BIT;
+                    image_entry *e=descriptor_image(&descriptor,b->type,b->kind==4,shader_pipeline_stage(s),access);images[j].imageView=descriptor_view(&descriptor,e,b->type,b->kind==4);
+                    // 描述符记的是这张图此刻的真实布局：descriptor_image 里的 image_access 刚把它转到目的布局。
+                    // The descriptor records the image's actual layout right now; the image_access inside
+                    // descriptor_image has just moved it to its destination layout.
+                    images[j].imageLayout=e->layout;}
                 w.pImageInfo=images;
             }
         }

@@ -3,6 +3,9 @@ typedef struct cached_image_view { VkImageViewType type; VkImageSubresourceRange
 typedef struct image_entry {
     uint64_t serial; tex_t texture; VkImage image; VkImageView view; VkDeviceMemory memory;
     VkFormat format; VkImageAspectFlags aspect; VkImageUsageFlags usage; uint32_t bpp; int compressed; uint64_t stamp; int populated;
+    // 图像当前真实布局，唯一改写处是 image_access；calloc 的零值是 UNDEFINED，创建时必须显式赋初值。
+    // The image's actual layout, written only by image_access. calloc's zero is UNDEFINED, so creation assigns it.
+    VkImageLayout layout;
     uint64_t source_stamp,source_hash,source_seen;int source_valid,source_tracked;
     VkPipelineStageFlags last_stage;VkAccessFlags last_access;int gpu_written;
     cached_image_view *views;
@@ -53,16 +56,83 @@ static VkFormat vk_format(int format) {
     if (format >= 0x79 && format <= 0x94) return VK_FORMAT_ASTC_4x4_UNORM_BLOCK + (format - 0x79) % 14 * 2 + (format >= 0x87);
     return format > 0 && format < sizeof formats / sizeof *formats ? formats[format] : VK_FORMAT_UNDEFINED;
 }
-// 按真正的读写风险同步；连续只读与通道内同附件写入不加全局屏障。
-// Synchronize actual read/write hazards; avoid global barriers for consecutive reads or same-pass attachment writes.
-static void image_access(image_entry *e,VkPipelineStageFlags stage,VkAccessFlags access) {
+// 布局选择默认关闭，设 DM_VK_LAYOUT 才启用。真机首测：GPU 从 19.52 降到 14.55 ms/帧（−25%），机制成立；
+// 但 sampled_attachment_conflicts 每帧约 8.6 次，说明"同绘制内既采样又当附件"在这作里是常态，
+// 那条路径下描述符记的布局会与通道转换后的实际布局不一致（未定义），所以先退回默认关，
+// 等把冲突图钉回 GENERAL 并去掉末端 present 的两次全 RT 转换之后再开。
+// Layouts stay off by default and need DM_VK_LAYOUT. First device run: GPU fell from 19.52 to 14.55 ms/frame
+// (-25%), so the mechanism holds, but sampled_attachment_conflicts fires ~8.6 times per frame, which means
+// "sampled and written as an attachment in the same draw" is routine in this game -- and under layouts the
+// descriptor then records a layout that disagrees with the image's actual one after the pass transition
+// (undefined). Reverting to off by default until conflicting images are pinned to GENERAL and the two
+// full-target present transitions are removed.
+static int vk_layout_mode=-1;
+static int vk_layout_enabled(void) { if(vk_layout_mode<0)vk_layout_mode=getenv("DM_VK_LAYOUT")!=NULL;return vk_layout_mode; }
+// 由即将发生的访问推出图像应处的布局，并且必须看 aspect：深度/模板格式图根本不允许 SHADER_READ_ONLY_OPTIMAL
+// （采样深度图只接受 DEPTH_READ_ONLY 系、两个 ATTACHMENT 系或 GENERAL），而 descriptor_image 确实会把深度图
+// 当采样资源返回，连未绑定槽的替身都是 DEPTH32F。所以深度/模板图除颜色附件外一律留在 GENERAL。
+// 存储写入（SHADER_WRITE）也留在 GENERAL：那是唯一允许 shader 写的布局。
+// Derive the layout from the access about to happen, and the aspect must be consulted: a depth/stencil-format
+// image may not use SHADER_READ_ONLY_OPTIMAL at all (sampling one only accepts the DEPTH_READ_ONLY family, the two
+// ATTACHMENT-family layouts, or GENERAL), and descriptor_image really does return depth images as sampled resources
+// -- even the unbound-slot stand-in is DEPTH32F. So depth/stencil images stay GENERAL for everything except a color
+// attachment. Storage writes stay GENERAL too, since that is the only layout permitting shader writes.
+static VkImageLayout image_target_layout(const image_entry *e,VkAccessFlags access) {
+    if(!vk_layout_enabled())return VK_IMAGE_LAYOUT_GENERAL;
+    // aspect 判断必须排在颜色判断之前：深度/模板格式的图即使被错当成颜色附件，也不能拿到
+    // COLOR_ATTACHMENT_OPTIMAL —— 那个布局要求图像有 COLOR_ATTACHMENT_BIT 用途。
+    // The aspect test must precede the color test: a depth/stencil-format image must not receive
+    // COLOR_ATTACHMENT_OPTIMAL even if it is wrongly bound as a color target, since that layout requires the image
+    // to have been created with COLOR_ATTACHMENT usage.
+    if(e&&(e->aspect&(VK_IMAGE_ASPECT_DEPTH_BIT|VK_IMAGE_ASPECT_STENCIL_BIT)))return VK_IMAGE_LAYOUT_GENERAL;
+    if(access&(VK_ACCESS_COLOR_ATTACHMENT_READ_BIT|VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT))return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    if(access&VK_ACCESS_SHADER_WRITE_BIT)return VK_IMAGE_LAYOUT_GENERAL;
+    if(access&VK_ACCESS_TRANSFER_WRITE_BIT)return VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    if(access&VK_ACCESS_TRANSFER_READ_BIT)return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    if(access&VK_ACCESS_SHADER_READ_BIT)return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    return VK_IMAGE_LAYOUT_GENERAL;
+}
+// 同一绘制里"先被当采样资源绑定、随后又被本帧当附件写"是 Vulkan 不允许的反馈环：今天只是内容未定义，
+// 但开启真实布局后还会让描述符里记的布局与通道开始前那次转换之后的实际布局不一致，而 VVL 看不见这种错位。
+// 这里只在布局启用时记录本帧被采样过的图像并数冲突，用来判断这情况在本作里究竟会不会发生、值不值得
+// 为它把冲突图退回 GENERAL。关闭时一个分支都不进，默认路径零开销。
+// Binding an image as sampled and then writing it as an attachment in the same draw is a feedback loop Vulkan
+// forbids: today that only makes contents undefined, but with real layouts the layout recorded in the descriptor
+// also ends up disagreeing with the image's actual layout after the transition taken before the pass -- and VVL
+// cannot see that mismatch. Only while layouts are enabled, record the images this draw sampled and count the
+// conflicts, so the device run can tell whether this game ever does it and whether pinning those images to GENERAL
+// is worth it. Disabled, no branch is taken and the default path pays nothing.
+static const image_entry *draw_sampled[8];static unsigned draw_sampled_count;static uint64_t layout_sampled_attachment_conflicts;
+static void draw_sampled_note(const image_entry *e) {
+    if(!vk_layout_enabled()||draw_sampled_count>=8)return;
+    draw_sampled[draw_sampled_count++]=e;
+}
+static int draw_sampled_contains(const image_entry *e) {
+    for(unsigned i=0;i<draw_sampled_count;i++)if(draw_sampled[i]==e)return 1;
+    return 0;
+}
+// 按真正的读写风险同步到指定布局；连续只读与通道内同附件写入不加全局屏障。
+// want 由调用方给出，是因为附件的描述与通道开始前的转换必须取同一个值：冲突图（同一绘制内既被采样
+// 又被当附件写，或与另一附件槽同图）要钉在 GENERAL，那个判断只有 draw 层做得出来。
+// Synchronize to an explicit destination layout. The caller supplies `want` because an attachment's description
+// and the transition taken just before the pass must agree: conflicting images (sampled and written as an
+// attachment in the same draw, or sharing a slot with another attachment) have to be pinned to GENERAL, and only
+// the draw layer can tell that.
+static void image_access_layout(image_entry *e,VkPipelineStageFlags stage,VkAccessFlags access,VkImageLayout want) {
     VkAccessFlags writes=VK_ACCESS_SHADER_WRITE_BIT|VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT|VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT|VK_ACCESS_TRANSFER_WRITE_BIT|VK_ACCESS_HOST_WRITE_BIT|VK_ACCESS_MEMORY_WRITE_BIT;
-    if(graphics_image_is_attachment(e)&&stage==e->last_stage&&access==e->last_access&&(access&(VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT|VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT)))return;
-    if(e->last_access&&((e->last_access|access)&writes)){
-        graphics_pass_end();VkImageMemoryBarrier b={.sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,.srcAccessMask=e->last_access,.dstAccessMask=access,.oldLayout=VK_IMAGE_LAYOUT_GENERAL,.newLayout=VK_IMAGE_LAYOUT_GENERAL,.srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,.image=e->image,.subresourceRange={e->aspect,0,e->texture.d.levels,0,e->texture.L.layers}};
-        vkCmdPipelineBarrier(command,e->last_stage,stage,0,0,NULL,0,NULL,1,&b);image_barriers++;
-        e->last_stage=stage;e->last_access=access;
+    int hazard=e->last_access&&((e->last_access|access)&writes);
+    if(graphics_image_is_attachment(e)&&stage==e->last_stage&&access==e->last_access&&want==e->layout&&(access&(VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT|VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT)))return;
+    // 布局不同就必须转换，哪怕没有读写冲突：从 UNDEFINED 或上一角色的布局直接声明新布局是非法的。
+    // A differing layout needs a transition even without a read/write hazard: claiming a new layout straight out
+    // of UNDEFINED or the previous role's layout is illegal.
+    if(hazard||want!=e->layout){
+        graphics_pass_end();VkImageMemoryBarrier b={.sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,.srcAccessMask=hazard?e->last_access:0,.dstAccessMask=access,.oldLayout=e->layout,.newLayout=want,.srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,.image=e->image,.subresourceRange={e->aspect,0,e->texture.d.levels,0,e->texture.L.layers}};
+        vkCmdPipelineBarrier(command,e->last_stage?e->last_stage:VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,stage,0,0,NULL,0,NULL,1,&b);image_barriers++;
+        e->last_stage=stage;e->last_access=access;e->layout=want;
     }else{e->last_stage|=stage;e->last_access|=access;}
+}
+static void image_access(image_entry *e,VkPipelineStageFlags stage,VkAccessFlags access) {
+    image_access_layout(e,stage,access,image_target_layout(e,access));
 }
 static uint32_t dimension(uint32_t v, unsigned level) { v >>= level; return v ? v : 1; }
 static unsigned gpu_bc_fallback_logs;
@@ -107,8 +177,17 @@ static image_entry *image_get(const tex_t *t) {
     if(ci.flags) view=t->d.target==NVN_TEXTURE_TARGET_CUBEMAP?VK_IMAGE_VIEW_TYPE_CUBE:VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
     VkImageViewCreateInfo vi={.sType=VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,.image=e->image,.viewType=view,.format=e->format,.subresourceRange={e->aspect,0,t->d.levels,0,t->L.layers}};
     VK_CHECK(vkCreateImageView(device,&vi,NULL,&e->view));
-    VkImageMemoryBarrier b={.sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,.oldLayout=VK_IMAGE_LAYOUT_UNDEFINED,.newLayout=VK_IMAGE_LAYOUT_GENERAL,.dstAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT,.srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,.image=e->image,.subresourceRange=vi.subresourceRange};
-    vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,NULL,0,NULL,1,&b);
+    // 开启真实布局时不在创建期先转一次 GENERAL：首次真实使用会带着正确目的布局转换，比 GENERAL→目标多出来的一次
+    // 整图转换更省，也避免新图在通道内被采样时先铺 GENERAL 再改布局。
+    // With real layouts enabled the creation path does not pre-transition to GENERAL: the first actual use
+    // transitions with its correct destination layout, which avoids an extra whole-image GENERAL→target hop and
+    // keeps a fresh texture sampled inside a pass from being laid out twice.
+    if(vk_layout_enabled())e->layout=VK_IMAGE_LAYOUT_UNDEFINED;
+    else {
+        VkImageMemoryBarrier b={.sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,.oldLayout=VK_IMAGE_LAYOUT_UNDEFINED,.newLayout=VK_IMAGE_LAYOUT_GENERAL,.dstAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT,.srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,.image=e->image,.subresourceRange=vi.subresourceRange};
+        vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,NULL,0,NULL,1,&b);
+        e->layout=VK_IMAGE_LAYOUT_GENERAL;
+    }
     e->next=image_list;image_list=e;e->hash_next=image_index[bucket];image_index[bucket]=e;return e;
 }
 // GPU 内容与 packaged CPU 源是两条独立版本；GPU 写不能把后来的 CPU 脏写永久屏蔽。
@@ -173,7 +252,7 @@ static void image_upload(image_entry *e) {
                 for(unsigned z=0;z<d;z++)for(unsigned y=0;y<rows;y++)memcpy((uint8_t*)p->source.mapped+(z*rows+y)*pitch,src+(z*rows+y)*stride,pitch);
             }else if(nvn_deswizzle(&t->d,level,layer,storage,p->source.mapped,pitch))die("Vulkan ASTC texture deswizzle failed");
             VkBufferImageCopy r={.bufferRowLength=(w+bw-1)/bw*bw,.bufferImageHeight=(h+bh-1)/bh*bh,.imageSubresource={e->aspect,level,layer,1},.imageExtent={w,h,d}};
-            vkCmdCopyBufferToImage(command,p->source.buffer,e->image,VK_IMAGE_LAYOUT_GENERAL,1,&r);
+            vkCmdCopyBufferToImage(command,p->source.buffer,e->image,e->layout,1,&r);
         }else if(bc_source&&!gpu_texture_compression_bc){
             uint64_t compressed_bytes=(uint64_t)pitch*rows*d;
             uint8_t *compressed=malloc(compressed_bytes);if(!compressed)die("Vulkan BC texture decode allocation %llu",(unsigned long long)compressed_bytes);
@@ -184,7 +263,7 @@ static void image_upload(image_entry *e) {
             for(unsigned z=0;z<d;z++)if(nvn_bc_decode(t->d.format,compressed+(size_t)z*pitch*rows,pitch,w,h,(uint8_t*)p->source.mapped+z*w*h*e->bpp,(size_t)w*e->bpp))die("Vulkan BC texture decode %#x",t->d.format);
             free(compressed);
             VkBufferImageCopy r={.imageSubresource={e->aspect,level,layer,1},.imageExtent={w,h,d}};
-            vkCmdCopyBufferToImage(command,p->source.buffer,e->image,VK_IMAGE_LAYOUT_GENERAL,1,&r);
+            vkCmdCopyBufferToImage(command,p->source.buffer,e->image,e->layout,1,&r);
         }else{
             uint64_t bytes=(uint64_t)pitch*rows*d;
             post_op *p=post_new(3);p->source=buffer_create(bytes);
@@ -192,7 +271,7 @@ static void image_upload(image_entry *e) {
                 for(unsigned z=0;z<d;z++)for(unsigned y=0;y<rows;y++)memcpy((uint8_t*)p->source.mapped+(z*rows+y)*pitch,src+(z*rows+y)*stride,pitch);
             }else if(nvn_deswizzle(&t->d,level,layer,storage,p->source.mapped,pitch))die("Vulkan texture deswizzle failed");
             VkBufferImageCopy r={.bufferRowLength=(bc_source||astc_source)?(w+bw-1)/bw*bw:0,.bufferImageHeight=(bc_source||astc_source)?(h+bh-1)/bh*bh:0,.imageSubresource={e->aspect,level,layer,1},.imageExtent={w,h,d}};
-            vkCmdCopyBufferToImage(command,p->source.buffer,e->image,VK_IMAGE_LAYOUT_GENERAL,1,&r);
+            vkCmdCopyBufferToImage(command,p->source.buffer,e->image,e->layout,1,&r);
         }
     }
     if(e->gpu_written){image_gpu_overwrites++;if(image_gpu_overwrites<=6||!(image_gpu_overwrites%64))LOG("[vulkan-upload] 覆盖 GPU 已渲染内容 serial=%llu %ux%u format=%#x bytes=%llu 第 %llu 次（客体内存里没有 GPU 那次渲染的结果）",(unsigned long long)t->serial,t->d.width,t->d.height,t->d.format,(unsigned long long)t->L.size,(unsigned long long)image_gpu_overwrites);}
@@ -209,12 +288,12 @@ static void clear_color(const p_clear_color *c) {
     // 非完整剪裁必须保留未覆盖像素；不能用整张清除替代。
     // A partial scissor must preserve uncovered pixels; never substitute a whole-image clear.
     if(state.scissor.w>0&&(state.scissor.x||state.scissor.y||state.scissor.w<(int)dimension(e->texture.d.width,r.baseMipLevel)||state.scissor.h<(int)dimension(e->texture.d.height,r.baseMipLevel)))die("Vulkan scissored clear pending");
-    graphics_pass_end();VkClearColorValue color;memcpy(color.float32,c->rgba,sizeof c->rgba);image_access(e,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);vkCmdClearColorImage(command,e->image,VK_IMAGE_LAYOUT_GENERAL,&color,1,&r);image_gpu_written(e);
+    graphics_pass_end();VkClearColorValue color;memcpy(color.float32,c->rgba,sizeof c->rgba);image_access(e,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);vkCmdClearColorImage(command,e->image,e->layout,&color,1,&r);image_gpu_written(e);
 }
 static void clear_depth(const p_clear_ds *c) {
     if(!state.rt.depth)return;image_entry *e=image_get(state.rt.depth);VkImageSubresourceRange r=texture_range(e,state.rt.has_dview?&state.rt.dview:NULL);r.aspectMask=0;
     if(c->depth_mask)r.aspectMask|=VK_IMAGE_ASPECT_DEPTH_BIT;if(c->stencil_mask){if(c->stencil_mask!=255)die("Vulkan partial stencil clear pending");r.aspectMask|=VK_IMAGE_ASPECT_STENCIL_BIT;}
-    r.aspectMask&=e->aspect;if(!r.aspectMask)return;graphics_pass_end();VkClearDepthStencilValue value={c->depth,c->stencil};image_access(e,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);vkCmdClearDepthStencilImage(command,e->image,VK_IMAGE_LAYOUT_GENERAL,&value,1,&r);image_gpu_written(e);
+    r.aspectMask&=e->aspect;if(!r.aspectMask)return;graphics_pass_end();VkClearDepthStencilValue value={c->depth,c->stencil};image_access(e,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);vkCmdClearDepthStencilImage(command,e->image,e->layout,&value,1,&r);image_gpu_written(e);
 }
 static void copy_buffer_texture(const p_copy_b2t *c) {
     if(c->r.width<=0||c->r.height<=0||c->r.depth<=0)return;
@@ -254,12 +333,12 @@ static void copy_buffer_texture(const p_copy_b2t *c) {
             .bufferImageHeight=dst_compressed?(uint32_t)((c->r.height+bh-1)/bh*bh):0,
             .imageSubresource={e->aspect,range.baseMipLevel,range.baseArrayLayer+(is3d?0:c->r.zoffset),is3d?1:c->r.depth},
             .imageOffset={c->r.xoffset,c->r.yoffset,is3d?c->r.zoffset:0},.imageExtent={c->r.width,c->r.height,is3d?c->r.depth:1}};
-        vkCmdCopyBufferToImage(command,p->source.buffer,e->image,VK_IMAGE_LAYOUT_GENERAL,1,&copy);
+        vkCmdCopyBufferToImage(command,p->source.buffer,e->image,e->layout,1,&copy);
     }else{
         post_op *p=post_new(3);p->source=buffer_create(bytes);
         for(int z=0;z<c->r.depth;z++)for(unsigned y=0;y<rows;y++)if(snapshot_read(c->src+z*(uint64_t)rows*stride+y*stride,(uint8_t*)p->source.mapped+(z*rows+y)*pitch,pitch))die("Vulkan texture copy source");
         VkBufferImageCopy copy={.imageSubresource={e->aspect,range.baseMipLevel,range.baseArrayLayer+(is3d?0:c->r.zoffset),is3d?1:c->r.depth},.imageOffset={c->r.xoffset,c->r.yoffset,is3d?c->r.zoffset:0},.imageExtent={c->r.width,c->r.height,is3d?c->r.depth:1}};
-        vkCmdCopyBufferToImage(command,p->source.buffer,e->image,VK_IMAGE_LAYOUT_GENERAL,1,&copy);
+        vkCmdCopyBufferToImage(command,p->source.buffer,e->image,e->layout,1,&copy);
     }
     image_gpu_written(e);
 }
@@ -319,7 +398,7 @@ static void clear_texture(const p_clear_tex *c) {
     image_access(e,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);
     int whole_xy=!c->r.xoffset&&!c->r.yoffset&&c->r.width==(int)w&&c->r.height==(int)h;
     if(!is3d&&whole_xy&&vk_format(format)==e->format&&((c->is_uint&&f.channels&&f.kind==TEXTURE_CLEAR_UINT)||(!c->is_uint&&(!f.channels||f.kind==TEXTURE_CLEAR_UNORM||f.kind==TEXTURE_CLEAR_SNORM||f.kind==TEXTURE_CLEAR_FLOAT)))){
-        range.baseArrayLayer+=c->r.zoffset;range.layerCount=c->r.depth;VkClearColorValue value;memcpy(&value,&c->c,sizeof value);vkCmdClearColorImage(command,e->image,VK_IMAGE_LAYOUT_GENERAL,&value,1,&range);
+        range.baseArrayLayer+=c->r.zoffset;range.layerCount=c->r.depth;VkClearColorValue value;memcpy(&value,&c->c,sizeof value);vkCmdClearColorImage(command,e->image,e->layout,&value,1,&range);
     }else{
         // VkClearColorImage 只接受 image，不接受 typed view；编码视图像素后原位 GPU 复制，避免非法格式别名。
         // VkClearColorImage accepts an image, not a typed view; encode view pixels and copy raw GPU bytes in place, avoiding illegal format aliases.
@@ -329,7 +408,7 @@ static void clear_texture(const p_clear_tex *c) {
         if(bytes==1||bytes==2||bytes==4){uint8_t repeated[4];for(unsigned i=0;i<4;i++)repeated[i]=pattern[i%bytes];uint32_t word;memcpy(&word,repeated,4);vkCmdFillBuffer(command,p->source.buffer,0,padded,word);
             VkBufferMemoryBarrier barrier={.sType=VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT,.dstAccessMask=VK_ACCESS_TRANSFER_READ_BIT,.srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,.buffer=p->source.buffer,.offset=0,.size=padded};vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,NULL,1,&barrier,0,NULL);
         }else for(uint64_t offset=0;offset<size;offset+=bytes)memcpy((uint8_t*)p->source.mapped+offset,pattern,bytes);
-        VkBufferImageCopy copy={.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,range.baseMipLevel,range.baseArrayLayer+(is3d?0:c->r.zoffset),is3d?1:c->r.depth},.imageOffset={c->r.xoffset,c->r.yoffset,is3d?c->r.zoffset:0},.imageExtent={c->r.width,c->r.height,is3d?c->r.depth:1}};vkCmdCopyBufferToImage(command,p->source.buffer,e->image,VK_IMAGE_LAYOUT_GENERAL,1,&copy);
+        VkBufferImageCopy copy={.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,range.baseMipLevel,range.baseArrayLayer+(is3d?0:c->r.zoffset),is3d?1:c->r.depth},.imageOffset={c->r.xoffset,c->r.yoffset,is3d?c->r.zoffset:0},.imageExtent={c->r.width,c->r.height,is3d?c->r.depth:1}};vkCmdCopyBufferToImage(command,p->source.buffer,e->image,e->layout,1,&copy);
     }
     image_gpu_written(e);
 }
@@ -409,7 +488,10 @@ static int astc_copy_region(image_entry *s,int src_layer,image_entry *d,int dst_
         vkCmdPipelineBarrier(command,temp_created?VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT:VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,0,0,NULL,0,NULL,1,&tb);
     }
     VkDescriptorSet set=descriptor_allocate(astc_copy_dsl);
-    VkDescriptorImageInfo si={.sampler=astc_copy_sampler,.imageView=src_view,.imageLayout=VK_IMAGE_LAYOUT_GENERAL};
+    // 源贴图此刻已由 image_access 转到它真正的布局，描述符必须照实记，不能再写死 GENERAL。
+    // The source image was just moved to its actual layout by image_access; the descriptor must record that, not
+    // a hardcoded GENERAL.
+    VkDescriptorImageInfo si={.sampler=astc_copy_sampler,.imageView=src_view,.imageLayout=s->layout};
     VkDescriptorImageInfo di={.imageView=dst_view,.imageLayout=VK_IMAGE_LAYOUT_GENERAL};
     VkWriteDescriptorSet wr[2]={
         {.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,.dstSet=set,.dstBinding=0,.descriptorCount=1,.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,.pImageInfo=&si},
@@ -426,7 +508,10 @@ static int astc_copy_region(image_entry *s,int src_layer,image_entry *d,int dst_
         VkImageCopy copy={.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1},
             .dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,dst_level,(uint32_t)dst_layer,1},
             .dstOffset={dx,dy,0},.extent={(uint32_t)w,(uint32_t)h,1}};
-        vkCmdCopyImage(command,astc_temps[temp_index].image,VK_IMAGE_LAYOUT_GENERAL,d->image,VK_IMAGE_LAYOUT_GENERAL,1,&copy);
+        // 临时图不是 image_entry，全程 GENERAL；目标图按 image_access 记录的真实布局复制。
+        // The temp image is not an image_entry and stays GENERAL throughout; the destination uses the layout
+        // image_access actually recorded.
+        vkCmdCopyImage(command,astc_temps[temp_index].image,VK_IMAGE_LAYOUT_GENERAL,d->image,d->layout,1,&copy);
     }
     return 1;
 }
@@ -477,8 +562,8 @@ static void copy_texture_texture(const p_copy_t2t *c) {
     VkImageAspectFlags aspects=src->aspect & dst->aspect;if(!aspects)die("Vulkan incompatible copy aspects");
     for(unsigned aspect=1;aspect<=VK_IMAGE_ASPECT_STENCIL_BIT;aspect<<=1)if(aspects & aspect){
         VkImageSubresourceLayers sl={aspect,sr.baseMipLevel,sr.baseArrayLayer+(s3?0:c->sr.zoffset),s3?1:c->sr.depth},dl={aspect,dr.baseMipLevel,dr.baseArrayLayer+(d3?0:c->dr.zoffset),d3?1:c->dr.depth};
-        if(src->format==dst->format&&c->sr.width==c->dr.width&&c->sr.height==c->dr.height&&c->sr.depth==c->dr.depth&&!(c->flags & (1|4|8|16))){VkImageCopy region={.srcSubresource=sl,.srcOffset={c->sr.xoffset,c->sr.yoffset,s3?c->sr.zoffset:0},.dstSubresource=dl,.dstOffset={c->dr.xoffset,c->dr.yoffset,d3?c->dr.zoffset:0},.extent={c->sr.width,c->sr.height,s3||d3?c->sr.depth:1}};vkCmdCopyImage(command,src->image,VK_IMAGE_LAYOUT_GENERAL,dst->image,VK_IMAGE_LAYOUT_GENERAL,1,&region);}
-        else {VkImageBlit region={.srcSubresource=sl,.srcOffsets={{c->sr.xoffset,c->sr.yoffset,s3?c->sr.zoffset:0},{c->sr.xoffset+c->sr.width,c->sr.yoffset+c->sr.height,s3?c->sr.zoffset+c->sr.depth:1}},.dstSubresource=dl,.dstOffsets={{c->dr.xoffset,c->dr.yoffset,d3?c->dr.zoffset:0},{c->dr.xoffset+c->dr.width,c->dr.yoffset+c->dr.height,d3?c->dr.zoffset+c->dr.depth:1}}};for(int axis=0;axis<3;axis++)if(c->flags & (4<<axis)){int32_t *a=(int32_t*)&region.srcOffsets[0],*b=(int32_t*)&region.srcOffsets[1];int32_t t=a[axis];a[axis]=b[axis];b[axis]=t;}vkCmdBlitImage(command,src->image,VK_IMAGE_LAYOUT_GENERAL,dst->image,VK_IMAGE_LAYOUT_GENERAL,1,&region,(c->flags&1)&&aspect==VK_IMAGE_ASPECT_COLOR_BIT?VK_FILTER_LINEAR:VK_FILTER_NEAREST);}
+        if(src->format==dst->format&&c->sr.width==c->dr.width&&c->sr.height==c->dr.height&&c->sr.depth==c->dr.depth&&!(c->flags & (1|4|8|16))){VkImageCopy region={.srcSubresource=sl,.srcOffset={c->sr.xoffset,c->sr.yoffset,s3?c->sr.zoffset:0},.dstSubresource=dl,.dstOffset={c->dr.xoffset,c->dr.yoffset,d3?c->dr.zoffset:0},.extent={c->sr.width,c->sr.height,s3||d3?c->sr.depth:1}};vkCmdCopyImage(command,src->image,src->layout,dst->image,dst->layout,1,&region);}
+        else {VkImageBlit region={.srcSubresource=sl,.srcOffsets={{c->sr.xoffset,c->sr.yoffset,s3?c->sr.zoffset:0},{c->sr.xoffset+c->sr.width,c->sr.yoffset+c->sr.height,s3?c->sr.zoffset+c->sr.depth:1}},.dstSubresource=dl,.dstOffsets={{c->dr.xoffset,c->dr.yoffset,d3?c->dr.zoffset:0},{c->dr.xoffset+c->dr.width,c->dr.yoffset+c->dr.height,d3?c->dr.zoffset+c->dr.depth:1}}};for(int axis=0;axis<3;axis++)if(c->flags & (4<<axis)){int32_t *a=(int32_t*)&region.srcOffsets[0],*b=(int32_t*)&region.srcOffsets[1];int32_t t=a[axis];a[axis]=b[axis];b[axis]=t;}vkCmdBlitImage(command,src->image,src->layout,dst->image,dst->layout,1,&region,(c->flags&1)&&aspect==VK_IMAGE_ASPECT_COLOR_BIT?VK_FILTER_LINEAR:VK_FILTER_NEAREST);}
     }
     image_gpu_written(dst);
 }
@@ -505,7 +590,7 @@ void mtl_read_texels(const tex_t *t,unsigned level,unsigned layer,const NVNcopyR
     if(e->aspect!=VK_IMAGE_ASPECT_COLOR_BIT)die("Vulkan depth readback pending");int bw,bh,bpb=nvn_fmt_bpb(t->d.format,&bw,&bh);
     uint32_t pitch=(r->width+bw-1)/bw*bpb,rows=(r->height+bh-1)/bh;uint64_t bytes=(uint64_t)pitch*rows*r->depth;vk_buffer readback=buffer_create(bytes);image_access(e,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);
     int block_format=readback_astc||readback_bc_source;
-    VkBufferImageCopy copy={.bufferRowLength=block_format?(uint32_t)((r->width+bw-1)/bw*bw):0,.bufferImageHeight=block_format?(uint32_t)((r->height+bh-1)/bh*bh):0,.imageSubresource={e->aspect,level,layer,1},.imageOffset={r->xoffset,r->yoffset,r->zoffset},.imageExtent={r->width,r->height,r->depth}};vkCmdCopyImageToBuffer(command,e->image,VK_IMAGE_LAYOUT_GENERAL,readback.buffer,1,&copy);
+    VkBufferImageCopy copy={.bufferRowLength=block_format?(uint32_t)((r->width+bw-1)/bw*bw):0,.bufferImageHeight=block_format?(uint32_t)((r->height+bh-1)/bh*bh):0,.imageSubresource={e->aspect,level,layer,1},.imageOffset={r->xoffset,r->yoffset,r->zoffset},.imageExtent={r->width,r->height,r->depth}};vkCmdCopyImageToBuffer(command,e->image,e->layout,readback.buffer,1,&copy);
     VkMemoryBarrier barrier={.sType=VK_STRUCTURE_TYPE_MEMORY_BARRIER,.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT,.dstAccessMask=VK_ACCESS_HOST_READ_BIT};vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&barrier,0,NULL,0,NULL);uint64_t ticket=mtl_sub_commit();mtl_wait(ticket,UINT64_MAX);
     // 真正 GPU 等待已结束后才持宿主写 guard，不能把 shared 锁带进 queue 等待。
     // Acquire the host-write guard only after the real GPU wait; never carry its shared lock into a queue wait.

@@ -292,7 +292,7 @@ static void graphics_probe_capture(uint64_t frame) {
         read->bw=bw;read->bh=bh;if(compressed){read->x=read->x/bw*bw;read->y=read->y/bh*bh;}uint64_t bytes=(uint64_t)((read->w+bw-1)/bw)*((read->h+bh-1)/bh)*read->d*bpb;
         if(compressed){if(bc_bytes+bytes>(8u<<20)){free(read);continue;}bc_bytes+=bytes;bc_count++;graphics_probe_material_source(image);}read->buffer=buffer_create(bytes);
         image_access(image,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT);VkBufferImageCopy copy={.imageSubresource={depth?VK_IMAGE_ASPECT_DEPTH_BIT:VK_IMAGE_ASPECT_COLOR_BIT,level,read->layer,1},.imageOffset={(int)read->x,(int)read->y,0},.imageExtent={read->w,read->h,read->d}};
-        vkCmdCopyImageToBuffer(command,image->image,VK_IMAGE_LAYOUT_GENERAL,read->buffer.buffer,1,&copy);read->next=reads;reads=read;
+        vkCmdCopyImageToBuffer(command,image->image,image->layout,read->buffer.buffer,1,&copy);read->next=reads;reads=read;
     }
     VkMemoryBarrier barrier={.sType=VK_STRUCTURE_TYPE_MEMORY_BARRIER,.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT,.dstAccessMask=VK_ACCESS_HOST_READ_BIT};vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&barrier,0,NULL,0,NULL);uint64_t read_ticket=mtl_sub_commit();mtl_wait(read_ticket,UINT64_MAX);
     char path[1200];snprintf(path,sizeof path,"%s/images.tsv",probe_directory);FILE *index=fopen(path,"w");if(!index)die("Vulkan probe index open");fputs("serial\tformat\tmip\tlayer\tfull_dimension\tregion\tbytes_per_pixel\tchannels\tfinite\tnan_inf\tzero\tmin\tmax\tmean\tfile\tblock_extent\tbytes_per_block\n",index);
