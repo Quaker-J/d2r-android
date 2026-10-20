@@ -21,17 +21,26 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <time.h>
 #include <stdatomic.h>
 #include <limits.h>
 #include <float.h>
 #include <math.h>
 
+typedef struct { double t; uint64_t buttons; int32_t lx,ly,rx,ry; } touch_sample;
+#define DM_TOUCH_RECORD_MAX 131072
 typedef struct {
     ANativeActivity *activity; ANativeWindow *window; AInputQueue *input;
     pthread_mutex_t lock; pthread_cond_t ready; pthread_t worker;
     int stop; _Atomic int started; _Atomic int activity_resumed;
     uint64_t pad_buttons,hat_buttons,trigger_buttons,move_keys;int tap_a;int32_t lx,ly,rx,ry;
     uint64_t touch_buttons;int32_t touch_lx,touch_ly,touch_rx,touch_ry;
+    // 触屏/手柄最终发布给游戏的状态就是录制内容；回放直接走同一个 dm_pad_set，复现移动与技能。
+    // The final pad state published to the game is what gets recorded; replay feeds the same dm_pad_set,
+    // reproducing movement and skills.
+    pthread_t touch_io_thread;int touch_io_started;_Atomic int touch_io_stop;
+    pthread_mutex_t touch_io_lock;_Atomic int record_active,replay_active;
+    double record_start;unsigned record_count;touch_sample *record_samples;
     pthread_t debug_thread;int debug_started;_Atomic int debug_stop;
     float requested_frame_rate;int frame_rate_attempted;
 } game_app;
@@ -347,6 +356,71 @@ int dm_thermal_now(void) {
     void *(*acquire)(void)=dlsym(library,"AThermal_acquireManager");void (*release)(void*)=dlsym(library,"AThermal_releaseManager");int (*status)(void*)=dlsym(library,"AThermal_getCurrentThermalStatus");int result=-1;
     if(acquire&&release&&status){void *manager=acquire();if(manager){int v=status(manager);result=v<0?-1:v==0?0:v<=2?1:v==3?2:3;release(manager);}}dlclose(library);return result;
 }
+static double touch_clock(void) {struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return t.tv_sec+t.tv_nsec/1e9;}
+static void touch_sleep(double seconds) {if(seconds<=0)return;struct timespec t;t.tv_sec=(time_t)seconds;t.tv_nsec=(long)((seconds-(double)t.tv_sec)*1e9);if(t.tv_nsec<0)t.tv_nsec=0;while(nanosleep(&t,&t)&&errno==EINTR){}}
+static const char *touch_io_path(game_app *s,char *buffer,size_t size,const char *name) {snprintf(buffer,size,"%s/%s",s->activity->internalDataPath,name);return buffer;}
+static void touch_record_note(game_app *s,uint64_t buttons,int32_t lx,int32_t ly,int32_t rx,int32_t ry) {
+    if(!atomic_load(&s->record_active))return;
+    pthread_mutex_lock(&s->touch_io_lock);
+    if(atomic_load(&s->record_active)&&s->record_count<DM_TOUCH_RECORD_MAX){touch_sample *x=&s->record_samples[s->record_count++];x->t=touch_clock()-s->record_start;x->buttons=buttons;x->lx=lx;x->ly=ly;x->rx=rx;x->ry=ry;}
+    pthread_mutex_unlock(&s->touch_io_lock);
+}
+static void touch_io_write(game_app *s) {
+    char tmp[1024],dst[1024];FILE *f=fopen(touch_io_path(s,tmp,sizeof tmp,"dm-touch-record.tmp"),"w");
+    if(!f){LOG("[touch-io] cannot write recording");return;}
+    pthread_mutex_lock(&s->touch_io_lock);unsigned count=s->record_count;
+    for(unsigned i=0;i<count;i++){const touch_sample *x=&s->record_samples[i];fprintf(f,"%.6f %llu %d %d %d %d\n",x->t,(unsigned long long)x->buttons,x->lx,x->ly,x->rx,x->ry);}
+    pthread_mutex_unlock(&s->touch_io_lock);fclose(f);
+    if(rename(tmp,touch_io_path(s,dst,sizeof dst,"dm-touch-record.txt"))){LOG("[touch-io] rename recording failed");return;}
+    LOG("[touch-io] recorded %u samples",count);
+}
+static void touch_io_done(game_app *s) {char path[1024];FILE *f=fopen(touch_io_path(s,path,sizeof path,"dm-touch-replay.done"),"w");if(f)fclose(f);}
+static int touch_io_load(game_app *s,touch_sample **out,unsigned *count) {
+    char path[1024];FILE *f=fopen(touch_io_path(s,path,sizeof path,"dm-touch-record.txt"),"r");if(!f)return 0;
+    touch_sample *samples=malloc(DM_TOUCH_RECORD_MAX*sizeof *samples);if(!samples){fclose(f);return 0;}
+    char line[160];double t;unsigned long long buttons;long lx,ly,rx,ry;unsigned n=0;
+    while(fgets(line,sizeof line,f)&&n<DM_TOUCH_RECORD_MAX)if(sscanf(line,"%lf %llu %ld %ld %ld %ld",&t,&buttons,&lx,&ly,&rx,&ry)==6){touch_sample *x=&samples[n++];x->t=t;x->buttons=buttons;x->lx=(int32_t)lx;x->ly=(int32_t)ly;x->rx=(int32_t)rx;x->ry=(int32_t)ry;}
+    fclose(f);*out=samples;*count=n;return n>0;
+}
+static void touch_io_replay(game_app *s,touch_sample *samples,unsigned count) {
+    char path[1024];unlink(touch_io_path(s,path,sizeof path,"dm-touch-replay.done"));
+    atomic_store(&s->replay_active,1);dm_pad_set(0,0,0,0,0);
+    double start=touch_clock();
+    for(unsigned i=0;i<count&&!atomic_load(&s->touch_io_stop);i++){touch_sleep(start+samples[i].t-touch_clock());dm_pad_set(samples[i].buttons,samples[i].lx,samples[i].ly,samples[i].rx,samples[i].ry);}
+    if(!atomic_load(&s->touch_io_stop)){touch_sleep(0.3);dm_pad_set(0,0,0,0,0);}
+    atomic_store(&s->replay_active,0);touch_io_done(s);
+    // 旗标由 App 移除，避免控制线程下一拍又从头回放。
+    // Remove the flag here so the control thread does not start the same replay again on its next poll.
+    unlink(touch_io_path(s,path,sizeof path,"dm-touch-replay"));
+    LOG("[touch-io] replay finished (%u samples)",count);
+}
+static void *touch_io_main(void *argument) {
+    game_app *s=argument;pthread_setname_np(pthread_self(),"D2R touch io");
+    while(!atomic_load(&s->touch_io_stop)){
+        char path[1024];
+        int record_flag=access(touch_io_path(s,path,sizeof path,"dm-touch-record"),F_OK)==0;
+        int replay_flag=access(touch_io_path(s,path,sizeof path,"dm-touch-replay"),F_OK)==0;
+        int recording=atomic_load(&s->record_active),replaying=atomic_load(&s->replay_active);
+        if(recording&&!record_flag){atomic_store(&s->record_active,0);touch_io_write(s);LOG("[touch-io] recording stopped");}
+        if(replaying&&!replay_flag){atomic_store(&s->replay_active,0);touch_io_done(s);}
+        recording=atomic_load(&s->record_active);replaying=atomic_load(&s->replay_active);
+        if(!recording&&!replaying&&record_flag){
+            pthread_mutex_lock(&s->touch_io_lock);
+            if(!s->record_samples)s->record_samples=malloc(DM_TOUCH_RECORD_MAX*sizeof *s->record_samples);
+            s->record_count=0;s->record_start=touch_clock();
+            if(s->record_samples){s->record_samples[s->record_count++]=(touch_sample){0,0,0,0,0,0};atomic_store(&s->record_active,1);}
+            pthread_mutex_unlock(&s->touch_io_lock);
+            LOG("[touch-io] recording started");
+        }else if(!recording&&!replaying&&replay_flag){
+            touch_sample *samples=NULL;unsigned count=0;
+            if(touch_io_load(s,&samples,&count)){LOG("[touch-io] replay started (%u samples)",count);touch_io_replay(s,samples,count);}
+            else{touch_io_done(s);unlink(touch_io_path(s,path,sizeof path,"dm-touch-replay"));LOG("[touch-io] replay has no recording");}
+            free(samples);
+        }
+        usleep(250000);
+    }
+    return NULL;
+}
 static void pad_publish(game_app *s) {
     int32_t x=s->lx,y=s->ly;
     if(s->move_keys){x=((!!(s->move_keys&DM_BTN_RIGHT))-(!!(s->move_keys&DM_BTN_LEFT)))*DM_STICK_MAX;y=((!!(s->move_keys&DM_BTN_UP))-(!!(s->move_keys&DM_BTN_DOWN)))*DM_STICK_MAX;}
@@ -357,7 +431,11 @@ static void pad_publish(game_app *s) {
     // simultaneously held DPAD keycode.
     if(!x&&!y){x=s->touch_lx;y=s->touch_ly;}
     int32_t rx=s->rx,ry=s->ry;if(!rx&&!ry){rx=s->touch_rx;ry=s->touch_ry;}
-    dm_pad_set(s->pad_buttons|s->hat_buttons|s->trigger_buttons|s->touch_buttons|(s->tap_a?DM_BTN_A:0),x,y,rx,ry);
+    uint64_t buttons=s->pad_buttons|s->hat_buttons|s->trigger_buttons|s->touch_buttons|(s->tap_a?DM_BTN_A:0);
+    touch_record_note(s,buttons,x,y,rx,ry);
+    // 回放期间屏蔽真实触屏/手柄发布，避免第二输入源盖掉录下的状态。
+    // Suppress live pad publication during replay so a second input source cannot overwrite the recorded state.
+    if(!atomic_load(&s->replay_active))dm_pad_set(buttons,x,y,rx,ry);
 }
 static void pad_clear(game_app *s) {s->pad_buttons=s->hat_buttons=s->trigger_buttons=s->move_keys=s->touch_buttons=0;s->tap_a=0;s->lx=s->ly=s->rx=s->ry=s->touch_lx=s->touch_ly=s->touch_rx=s->touch_ry=0;pad_publish(s);}
 static int32_t touch_axis(jint value) {return value>DM_STICK_MAX?DM_STICK_MAX:value< -DM_STICK_MAX?-DM_STICK_MAX:value;}
@@ -579,7 +657,12 @@ static void destroyed(ANativeActivity *a) {game_app *s=a->instance;atomic_store(
     // Ask here only when the window is still present, i.e. window_destroyed never ran.
     pthread_mutex_lock(&s->lock);int window_present=s->window!=NULL;pthread_mutex_unlock(&s->lock);
     if(atomic_load(&s->started)){if(window_present)settle_save();dm_host_shutdown("Android activity destroyed");}
-    pthread_mutex_lock(&s->lock);s->stop=1;pthread_cond_signal(&s->ready);pthread_mutex_unlock(&s->lock);pthread_join(s->worker,NULL);if(s->debug_started)pthread_join(s->debug_thread,NULL);if(s->window)ANativeWindow_release(s->window);free(s);application=NULL;}
+    pthread_mutex_lock(&s->lock);s->stop=1;pthread_cond_signal(&s->ready);pthread_mutex_unlock(&s->lock);pthread_join(s->worker,NULL);if(s->debug_started)pthread_join(s->debug_thread,NULL);
+    atomic_store(&s->touch_io_stop,1);if(s->touch_io_started)pthread_join(s->touch_io_thread,NULL);
+    if(atomic_load(&s->record_active)){atomic_store(&s->record_active,0);touch_io_write(s);}
+    if(atomic_load(&s->replay_active)){atomic_store(&s->replay_active,0);touch_io_done(s);}
+    free(s->record_samples);pthread_mutex_destroy(&s->touch_io_lock);
+    if(s->window)ANativeWindow_release(s->window);free(s);application=NULL;}
 __attribute__((visibility("default"))) void ANativeActivity_onCreate(ANativeActivity *a,void *saved,size_t bytes) {
     // NativeActivity 自行 dlopen，不登记 Java 类加载器的 native 库；显式注册文本与触控回调。
     // NativeActivity dlopens its library without Java class-loader native-library registration; explicitly register text and touch callbacks.
@@ -593,6 +676,7 @@ __attribute__((visibility("default"))) void ANativeActivity_onCreate(ANativeActi
     };
     if((*a->env)->RegisterNatives(a->env,klass,methods,sizeof methods/sizeof methods[0])!=JNI_OK){(*a->env)->ExceptionDescribe(a->env);(*a->env)->ExceptionClear(a->env);ANativeActivity_finish(a);return;}(*a->env)->DeleteLocalRef(a->env,klass);
     (void)saved;(void)bytes;game_app *s=calloc(1,sizeof *s);if(!s){ANativeActivity_finish(a);return;}s->activity=a;a->instance=s;application=s;pthread_mutex_init(&s->lock,NULL);pthread_cond_init(&s->ready,NULL);
+    pthread_mutex_init(&s->touch_io_lock,NULL);if(!pthread_create(&s->touch_io_thread,NULL,touch_io_main,s))s->touch_io_started=1;else LOG("[touch-io] control thread unavailable");
     a->callbacks->onNativeWindowCreated=window_created;a->callbacks->onNativeWindowResized=window_resized;a->callbacks->onNativeWindowDestroyed=window_destroyed;a->callbacks->onInputQueueCreated=input_created;a->callbacks->onInputQueueDestroyed=input_destroyed;a->callbacks->onPause=paused;a->callbacks->onResume=resumed;a->callbacks->onDestroy=destroyed;
     ANativeActivity_setWindowFlags(a,AWINDOW_FLAG_FULLSCREEN|AWINDOW_FLAG_KEEP_SCREEN_ON,0);pthread_attr_t attr;pthread_attr_init(&attr);pthread_attr_setstacksize(&attr,64u<<20);int error=pthread_create(&s->worker,&attr,boot,s);pthread_attr_destroy(&attr);if(error)ANativeActivity_finish(a);
 }
