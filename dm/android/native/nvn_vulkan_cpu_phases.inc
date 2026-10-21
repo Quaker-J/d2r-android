@@ -1,4 +1,5 @@
 #include <sched.h>
+#include <time.h>
 // 只读分段计时：按帧累计录制线程与出图路径在各阶段的墙钟，回答 CPU 预算花在哪里。
 // Read-only phase timing: accumulate the recording thread's and present path's wall clock per stage
 // each frame, so the CPU budget can be attributed from measurement instead of estimate.
@@ -7,6 +8,9 @@
 enum {
     DM_CPU_PHASE_DRAW, DM_CPU_PHASE_BIND, DM_CPU_PHASE_UBO, DM_CPU_PHASE_DESCRIPTOR,
     DM_CPU_PHASE_LAYOUT, DM_CPU_PHASE_DEPENDENCY, DM_CPU_PHASE_RESOLVE, DM_CPU_PHASE_DESCSET,
+    // P4 拆解：draw 自耗的四个子段（附件+通道选择、顶点/索引、管线键、命令发射）。
+    // P4 breakdown: four sub-stages of draw self-cost (attachments+pass, vertices/indices, pipeline key, emission).
+    DM_CPU_PHASE_ATTACH, DM_CPU_PHASE_VERTEX, DM_CPU_PHASE_PIPE, DM_CPU_PHASE_EMIT, DM_CPU_PHASE_PREPARE,
     DM_CPU_PHASE_RECORD_COUNT
 };
 enum {
@@ -15,22 +19,52 @@ enum {
 };
 static const char *const dm_cpu_phase_names[DM_CPU_PHASE_COUNT] = {
     "draw", "bind", "ubo", "desc", "layout", "dep", "resolve", "descset",
+    "attach", "vertex", "pipe", "emit", "prepare",
     "submit", "acquire", "blit", "present", "wait_prior", "present_total"
 };
 // 阶段可以嵌套：draw 是包含 bind/dep 的外层，present_total 是出图路径的外层；看每项自己的 calls 就能分辨包含与自耗。
 // Phases may nest: draw encloses bind/dep and present_total encloses the present path; each item's own call count separates inclusive from self cost.
 static uint64_t dm_cpu_phase_ns[DM_CPU_PHASE_COUNT], dm_cpu_phase_calls[DM_CPU_PHASE_COUNT];
 static uint64_t dm_cpu_phase_frames;
+// ARM64 用户态虚拟计数器只有几条指令；相位计时每帧约有四万次读时钟，换掉 vDSO 调用本身就是可观的 CPU。
+// The ARM64 user-space virtual counter is a few instructions; phase timing reads the clock tens of
+// thousands of times per frame, so replacing the vDSO call is itself measurable CPU.
+#if defined(__aarch64__)
+static inline uint64_t dm_cpu_phase_ticks(void) { uint64_t value; __asm__ __volatile__("mrs %0, cntvct_el0" : "=r"(value)); return value; }
+static _Atomic uint64_t dm_cpu_phase_tick_scale;   // (ns << 32) / tick；UINT64_MAX 表示标定失败 | (ns << 32) / tick; UINT64_MAX means calibration failed
+static uint64_t dm_cpu_phase_tick_scale_get(void) {
+    uint64_t scale = atomic_load_explicit(&dm_cpu_phase_tick_scale, memory_order_acquire);
+    if (scale) return scale == UINT64_MAX ? 0 : scale;
+    // 用一次 1 ms 睡眠标定计数频率；启动期一次性开销，避免假设某个固定频率。
+    // Calibrate the counter frequency with a one-off 1 ms sleep at startup instead of assuming a fixed rate.
+    struct timespec pause = {0, 1000000};
+    uint64_t start_ns = dm_android_clock_ns(CLOCK_MONOTONIC), start_ticks = dm_cpu_phase_ticks();
+    nanosleep(&pause, NULL);
+    uint64_t end_ticks = dm_cpu_phase_ticks(), end_ns = dm_android_clock_ns(CLOCK_MONOTONIC);
+    uint64_t ticks = end_ticks - start_ticks, ns = end_ns - start_ns;
+    scale = ticks && ns ? (uint64_t)(((__uint128_t)ns << 32) / ticks) : 0;
+    atomic_store_explicit(&dm_cpu_phase_tick_scale, scale ? scale : UINT64_MAX, memory_order_release);
+    return scale;
+}
+static inline uint64_t dm_cpu_phase_begin(void) { return dm_cpu_phase_ticks(); }
+static inline void dm_cpu_phase_end(unsigned phase, uint64_t started) {
+    uint64_t scale = dm_cpu_phase_tick_scale_get();
+    uint64_t delta = dm_cpu_phase_ticks() - started;
+    dm_cpu_phase_ns[phase] += scale ? (uint64_t)(((__uint128_t)delta * scale) >> 32) : 0;
+    dm_cpu_phase_calls[phase]++;
+}
+#else
 static inline uint64_t dm_cpu_phase_begin(void) { return dm_android_clock_ns(CLOCK_MONOTONIC); }
 static inline void dm_cpu_phase_end(unsigned phase, uint64_t started) {
     dm_cpu_phase_ns[phase] += dm_android_clock_ns(CLOCK_MONOTONIC) - started;
     dm_cpu_phase_calls[phase]++;
 }
+#endif
 static void dm_cpu_phase_report(uint64_t frames) {
     if (!frames) return;
     dm_cpu_phase_frames += frames;
     static uint64_t previous_ns[DM_CPU_PHASE_COUNT], previous_calls[DM_CPU_PHASE_COUNT];
-    char line[768]; size_t used = 0;
+    char line[1024]; size_t used = 0;
     for (unsigned phase = 0; phase < DM_CPU_PHASE_COUNT; phase++) {
         double ms = (double)(dm_cpu_phase_ns[phase] - previous_ns[phase]) / (frames * 1e6);
         double calls = (double)(dm_cpu_phase_calls[phase] - previous_calls[phase]) / frames;

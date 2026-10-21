@@ -942,9 +942,9 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
     // Inform system display policy of the actual target period without changing pacing or GPU synchronization.
     if(dm_android_window_frame_period)dm_android_window_frame_period(period);
     uint64_t completion_ticket=mtl_last_fence(),previous_acquire=screen_acquire_ticket;
-    uint64_t previous_start=dm_cpu_phase_begin();
+    uint64_t previous_start=dm_cpu_phase_begin(),previous_clock=dm_android_clock_ns(CLOCK_MONOTONIC);
     if(previous_acquire&&!mtl_wait(previous_acquire,UINT64_MAX))die("Vulkan prior acquire consumer wait failed");
-    uint64_t previous_acquire_ns=dm_android_clock_ns(CLOCK_MONOTONIC)-previous_start;
+    uint64_t previous_acquire_ns=dm_android_clock_ns(CLOCK_MONOTONIC)-previous_clock;
     dm_cpu_phase_end(DM_CPU_PHASE_WAIT_PRIOR,previous_start);
     uint64_t ticket=++presents;graphics_probe_capture(ticket);
     if(!(ticket%60))LOG("[vulkan-prior-acquire] frame=%llu queued=%llu prior_consumer=%llu wait=%.3f ms scope=prior_binary_acquire_consumer current_guest_publication=async",(unsigned long long)ticket,(unsigned long long)completion_ticket,(unsigned long long)previous_acquire,previous_acquire_ns/1e6);
@@ -952,10 +952,10 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
         // 前次 blit 已消费 acquire token；当前帧通过独立返回的真实票号追踪完成。
         // The prior blit consumed the acquire token; a separate returned GPU ticket tracks this frame's completion.
         if(screen_acquire_ticket&&!mtl_wait(screen_acquire_ticket,0))die("Vulkan acquire token reused before its consumer completed");
-        uint64_t acquire_start=dm_android_clock_ns(CLOCK_MONOTONIC);
+        uint64_t acquire_phase=dm_cpu_phase_begin(),acquire_start=dm_android_clock_ns(CLOCK_MONOTONIC);
         uint32_t index; VkResult result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, screen_acquired, VK_NULL_HANDLE, &index);
         acquire_ns=dm_android_clock_ns(CLOCK_MONOTONIC)-acquire_start;
-        dm_cpu_phase_end(DM_CPU_PHASE_ACQUIRE,acquire_start);
+        dm_cpu_phase_end(DM_CPU_PHASE_ACQUIRE,acquire_phase);
         if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) die("Vulkan acquire: %d", result);
         if(index>=screen_count)die("Vulkan acquire image bounds");screen_rendered=screen_present_wait[index];
         uint64_t blit_phase=dm_cpu_phase_begin();
@@ -977,10 +977,10 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
         screen_submission = 1; completion_ticket=screen_acquire_ticket=mtl_sub_commit(); screen_submission = 0; screen_initialized[index] = 1;
         dm_cpu_phase_end(DM_CPU_PHASE_BLIT,blit_phase);
         VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &screen_rendered, .swapchainCount = 1, .pSwapchains = &swapchain, .pImageIndices = &index};
-        uint64_t present_lock_start=dm_android_clock_ns(CLOCK_MONOTONIC);pthread_mutex_lock(&queue_lock);
+        uint64_t present_phase=dm_cpu_phase_begin(),present_lock_start=dm_android_clock_ns(CLOCK_MONOTONIC);pthread_mutex_lock(&queue_lock);
         uint64_t present_start=dm_android_clock_ns(CLOCK_MONOTONIC);present_lock_ns=present_start-present_lock_start;
         result = vkQueuePresentKHR(queue, &pi);present_ns=dm_android_clock_ns(CLOCK_MONOTONIC)-present_start;
-        dm_cpu_phase_end(DM_CPU_PHASE_PRESENT,present_lock_start);
+        dm_cpu_phase_end(DM_CPU_PHASE_PRESENT,present_phase);
         if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) die("Vulkan present: %d", result); pthread_mutex_unlock(&queue_lock);
         if(ticket<=3||!(ticket%600))LOG("[vulkan-present] frame=%llu image=%u submit=%llu completed=%llu semaphore_per_image=1 queue_idle=0",(unsigned long long)ticket,index,(unsigned long long)screen_acquire_ticket,(unsigned long long)atomic_load(&completed));
         if (ticket <= 3 || ticket == 30) LOG("[vulkan] Android game frame %llu presented", (unsigned long long)ticket);

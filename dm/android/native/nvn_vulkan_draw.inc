@@ -134,7 +134,9 @@ static void draw_graphics_inner(const p_draw *draw,const p_draw_idx *indexed) {
     // 零顶点/零实例的 NVN 绘制不访问索引和资源，也不增加遮挡样本。
     // NVN draws with zero vertices/instances access no indices/resources and add no occlusion samples.
     if ((draw && draw->count <= 0) || (indexed && (indexed->count <= 0 || !indexed->instances))) return;
+    uint64_t prepare_phase=dm_cpu_phase_begin();
     snapshot_prepare();
+    dm_cpu_phase_end(DM_CPU_PHASE_PREPARE,prepare_phase);
     if(!state.program||(!state.rt.n&&!state.rt.depth))die("Vulkan draw without program/targets");shader_entry *vs=NULL,*fs=NULL;
     for(unsigned i=0;i<state.program->nstage;i++){shader_entry *s=program_shader(state.program,i);if(s->stage==0)vs=s;else if(s->stage==1)fs=s;else die("Vulkan graphics stage %u pending",s->stage);}
     if(!vs)die("Vulkan draw missing vertex stage");
@@ -167,6 +169,7 @@ static void draw_graphics_inner(const p_draw *draw,const p_draw_idx *indexed) {
     // the same value image_access(the real entry, same access) computes.
     const VkImageLayout color_layout=image_target_layout(NULL,VK_ACCESS_COLOR_ATTACHMENT_READ_BIT|VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT),
         depth_layout=image_target_layout(NULL,VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT|VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+    uint64_t attach_phase=dm_cpu_phase_begin();
     VkImageView views[9]={0};image_entry *images[9]={0};const tex_t *sources[9]={0};int populated_now[9]={0};VkImageLayout slot_of[9]={0};VkAttachmentDescription attachments[9]={0};VkAttachmentReference colors[8]={0},depth={VK_ATTACHMENT_UNUSED,depth_layout};unsigned na=0;uint32_t width=UINT32_MAX,height=UINT32_MAX;
     int memo=vk_memo_enabled()&&attach_memo.valid&&attach_memo.n==state.rt.n&&!memcmp(attach_memo.rt,&state.rt,sizeof attach_memo.rt);
     // 命中前还要逐附件比两样会在两次绘制之间自己变的东西：populated 决定 loadOp（上传或清除后会变），
@@ -236,8 +239,10 @@ static void draw_graphics_inner(const p_draw *draw,const p_draw_idx *indexed) {
             else image_access_layout(images[i],VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,VK_ACCESS_COLOR_ATTACHMENT_READ_BIT|VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,slot_of[i]);
         graphics_pass_entry *pass=graphics_pass_get(pass_key,attachments,colors,depth,1);frame=graphics_frame_get(pass,views,images,width,height);
     }
+    dm_cpu_phase_end(DM_CPU_PHASE_ATTACH,attach_phase);
     // 只复制索引真正可访问的顶点前缀，避免每次绘制读取整段大型绑定池。
     // Copy only the vertex prefix reachable by the actual indices, rather than the entire large bound pool for every draw.
+    uint64_t vertex_phase=dm_cpu_phase_begin();
     VkBuffer index_buffer=VK_NULL_HANDLE;VkIndexType index_type=VK_INDEX_TYPE_UINT16;
     int64_t highest=draw?(int64_t)draw->first+draw->count-1:0;
     if(indexed){unsigned size=indexed->itype==0?1:indexed->itype==1?2:4;uint64_t bytes=(uint64_t)indexed->count*size;
@@ -252,6 +257,8 @@ static void draw_graphics_inner(const p_draw *draw,const p_draw_idx *indexed) {
     VkVertexInputAttributeDescription attrs[16];VkVertexInputBindingDescription streams[16];unsigned nattr=0,nstream=0;uint8_t stream_used[16]={0};uint32_t attribute_end[16]={0};VkBuffer vertex_buffers[16]={0};VkDeviceSize offsets[16]={0};
     for(unsigned i=0;i<16;i++){va_st a=state.attributes[i];if(!a.fmt||!vs->attributes[i])continue;VkFormat format=vk_format(a.fmt);if(format==VK_FORMAT_UNDEFINED)die("Vulkan vertex format %#x pending",a.fmt);attrs[nattr++]=(VkVertexInputAttributeDescription){i,a.stream,format,a.offset};stream_used[a.stream]=1;int bw,bh;uint32_t end=a.offset+nvn_fmt_bpb(a.fmt,&bw,&bh);if(end>attribute_end[a.stream])attribute_end[a.stream]=end;}
     for(unsigned i=0;i<16;i++)if(stream_used[i]){const vs_st *s=&state.streams[i];const NVNbufferRange *v=&state.vertices[i];if(s->divisor>1)die("Vulkan vertex divisor %u pending",s->divisor);if(!v->address||!v->size)die("Vulkan missing vertex buffer %u",i);streams[nstream++]=(VkVertexInputBindingDescription){i,s->stride,s->divisor?VK_VERTEX_INPUT_RATE_INSTANCE:VK_VERTEX_INPUT_RATE_VERTEX};uint64_t element=s->divisor?(indexed?(uint64_t)indexed->base_instance+indexed->instances-1:0):(uint64_t)highest;uint64_t needed=element*s->stride+attribute_end[i];if(needed>v->size)needed=v->size;VkDescriptorBufferInfo fetched=forward_readonly_buffer(v->address,needed,1,VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT);vertex_buffers[i]=fetched.buffer;offsets[i]=fetched.offset;}
+    dm_cpu_phase_end(DM_CPU_PHASE_VERTEX,vertex_phase);
+    uint64_t pipe_phase=dm_cpu_phase_begin();
     VkPrimitiveTopology primitive=topology(draw?draw->prim:indexed->prim);
     // NVN 范围可反向或为常值，Vulkan 同样允许；默认 0..1 由状态初始化提供。
     // NVN permits reversed or constant ranges, as does Vulkan; state initialization supplies the 0..1 default.
@@ -288,6 +295,8 @@ static void draw_graphics_inner(const p_draw *draw,const p_draw_idx *indexed) {
         cached->next=graphics_pipelines[pipeline_bucket];graphics_pipelines[pipeline_bucket]=cached;pipeline_creations++;resource_create_end(1,creation,vs->key,fs->module?fs->key:NULL);
         pso_record_graphics(vs,fs,&frame->key.pass->key,&key);}else{layout=cached->layout;pipeline_reuses++;}
     graphics_last_pipeline=cached;
+    dm_cpu_phase_end(DM_CPU_PHASE_PIPE,pipe_phase);
+    uint64_t emit_phase=dm_cpu_phase_begin();
     graphics_pass_begin(frame);
     graphics_command_apply(cached->pipeline,layout,sets,dynamic_offsets,dynamic_count,&viewport,&scissor,state.blend_color.rgba,state.polygon_offset.units,state.polygon_offset.factor,state.stencil_faces);
     for(unsigned i=0;i<16;i++)if(vertex_buffers[i])graphics_command_vertices(i,vertex_buffers[i],offsets[i]);
@@ -303,6 +312,7 @@ static void draw_graphics_inner(const p_draw *draw,const p_draw_idx *indexed) {
         vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_VERTEX_SHADER_BIT|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&writes,0,NULL,0,NULL);}
     }
     batch_draws++;
+    dm_cpu_phase_end(DM_CPU_PHASE_EMIT,emit_phase);
     if (draw_count <= 12 && getenv("DM_VK_TRACE")) LOG("[vulkan] draw=%llu %s/%s rt=%ux%u vp=%g,%g %gx%g sc=%d,%d %dx%d mask=%#x cull=%u front=%u samples=%llu", (unsigned long long)draw_count, vs->key, fs->key, width, height, viewport.x, viewport.y, viewport.width, viewport.height, x, y, sw, sh, state.mask.mask, (unsigned)state.polygon.cull, (unsigned)state.polygon.front, (unsigned long long)samples_passed);
 }
 #include "nvn_vulkan_warm.inc"
