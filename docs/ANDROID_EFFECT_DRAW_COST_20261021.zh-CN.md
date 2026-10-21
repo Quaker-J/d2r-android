@@ -80,6 +80,12 @@ draw 13.98 = bind 7.45（⊃ resolve 6.47 ⊃ ubo 4.04）+ dep 1.41 + draw 自�
 - `shader_entry` 加载时预计算 `writes`/`host_writes`，保留 `flags_valid` 兼容测试/手工构造的 shader。
 - `pipeline_entry` 缓存 `(vs,fs)` 对应的 `VkPipelineLayout`；只在真正创建管线时调用一次 `graphics_layout_get()`，命中路径不再取全局锁。
 
+### 3.6 per-shader 描述符集绑定 memo（第三轮，`nvn_vulkan_shader.inc`、`nvn_vulkan_binding_cache.inc`）
+
+- `shader_entry` 保存上次绑定解析出的真实值（`buffer/offset/range`、`sampler/imageView/imageLayout`、texel view）。解析循环仍完整执行——UBO 内容比较、`image_upload`、`image_access`、SSBO 转发、CS 探针都不跳过；只有这些值全部相同才复用上次的 `VkDescriptorSet`。
+- 命中跳过 payload 打包、FNV 哈希、桶查找与 memcmp；未命中回退原 `descriptor_cache_find/allocate/update` 并刷新 memo。动态偏移不进集合，每次仍照常填写。
+- `binding_cache_reset()` 递增 `binding_memo_epoch`：描述符池 reset 或批资源切换时所有 shader 的 memo 一起失效。memo 与既有 `descriptor_cache` 一样比较裸句柄、随池重置失效，不新增句柄复用风险。
+
 ## 4. 复核中拦下的正确性问题
 
 两轮并发/生命周期与图形/依赖语义子 agent 复核，修掉：
@@ -134,16 +140,31 @@ draw 13.98 = bind 7.45（⊃ resolve 6.47 ⊃ ubo 4.04）+ dep 1.41 + draw 自�
 
 5×60 帧窗：变体 36.04 FPS / p50 27.27，全量 37.37 / 26.49，方向一致；设备电量/热状态仍有影响，故以同核分段为主。变体与全量 APK 均做了双端 md5 核对；临时 worktree 与分支已清理。
 
+### 5.2 P1 memo 同机相邻 A/B（2026-10-21 14:08–14:14）
+
+同一设备先跑现装基线包（3097fce，md5 `5e2bdf505a57ea9aa103d6f0bb341d9e`），再构建并安装 P1 新包，各测营地初始与移开两个位置；绘制数 1272→1276.8、800→801.1 calls，属同场景。
+
+| ms/帧 | 初始基线 | 初始 P1 | 移开基线 | 移开 P1 |
+| --- | ---: | ---: | ---: | ---: |
+| `descset` | 1.131 | **0.847** | 0.743 | **0.575** |
+| `desc`（描述符查找内部） | 0.505 | **0.279** | 0.301 | **0.173** |
+| `draw` | 13.101 | 13.209 | 8.035 | 8.571 |
+| `binding_memo` 命中/未命中 | — | 1698.6 / 861.1（66.4%） | — | 1038.9 / 565.4（64.8%） |
+
+- `descset` 两个位置均降约 23–25%，是本轮唯一可直接归因的收益（约 0.17–0.28 ms/帧，低于预估的 0.5–1.5 ms）。memo 接管后 `descriptor hits/miss` 从 1768/782 降到 76.9/784.2。
+- `draw` 顶层相位被 ±0.5–1.3 ms 的窗口波动掩盖：初始 +0.1、移开 +0.5 ms；同轮 `bind` 6.775→6.329 / 4.396→3.791、`ubo` 3.311→3.113 / 2.360→2.071、`resolve` 5.903→5.647 / 4.089→3.477。FPS 34.85→35.05 与 44.56→45.72，GPU 13.55→14.52 / 13.00→13.45（新包热态更差），因此不把 FPS 差值当作证据。
+- 截图与基线一致；四份日志无 FATAL/STOP/native crash；新包 md5 `ea8477d2986f00972afd3907c611ae57`，装机双端一致。
+
 ## 6. 改动文件
 
-- `dm/android/native/nvn_vulkan_binding_cache.inc`：UBO 快路、范围化 known-copy 判断、计数。
+- `dm/android/native/nvn_vulkan_binding_cache.inc`：UBO 快路、范围化 known-copy 判断、计数、binding memo 纪元与计数。
 - `dm/android/native/nvn_vulkan_async.inc`：`async_no_known_copy_overlap`、`pending_unknown_epoch`。
 - `dm/android/native/nvn_vulkan_tex.inc`：描述符注册 seqlock、texture/sampler 读缓存、图像区间纪元与基线、`image_state_epoch`。
-- `dm/android/native/nvn_vulkan_shader.inc`：`descriptor_texture` 读缓存、shader 写标记、`dep_textures` 数组。
+- `dm/android/native/nvn_vulkan_shader.inc`：`descriptor_texture` 读缓存、shader 写标记、`dep_textures` 数组、per-shader 描述符集 memo。
 - `dm/android/native/nvn_vulkan_sampler.inc`：sampler 无锁读缓存。
 - `dm/android/native/nvn_vulkan_dependencies.inc`：贴图 clean 记忆与三纪元失效。
 - `dm/android/native/nvn_vulkan_draw.inc`、`nvn_vulkan_pass.inc`：pipeline layout 缓存、写标记使用。
-- `dm/android/native/nvn_vulkan.c`：新快路日志字段、弱符号声明。
+- `dm/android/native/nvn_vulkan.c`：新快路日志字段（含 `binding_memo hits/miss`）、弱符号声明。
 - `dm/gfx/nvn/nvn_dirty.c/.h`：区间 token/写纪元、奇偶 seqlock、表级 seqlock、新 API。
 - `dm/host/hle_svc.c`、`hle.h`：`dm_android_guest_heap_compare_owned`。
 - `dm/android/tests/vulkan_test.c`、`owned_snapshot_test.c`：新 API 桩。
@@ -174,11 +195,12 @@ adb shell am force-stop org.d2r.android.port
 adb shell input keyevent 223
 ```
 
-看哪些字段：`[vulkan-cpu-phases]` 的 `draw/bind/ubo/dep/resolve/descset`、`[vulkan-bindings]` 的 `ubo_compare_fast/direct`、`tex/samp_read_fast`、`image_clean_fast`、`dep_tex_memo`、`[vulkan-frame-stability]` 的 interval/over33ms。
+看哪些字段：`[vulkan-cpu-phases]` 的 `draw/bind/ubo/dep/resolve/descset`、`[vulkan-bindings]` 的 `ubo_compare_fast/direct`、`tex/samp_read_fast`、`image_clean_fast`、`dep_tex_memo`、`binding_memo hits/miss`、`[vulkan-frame-stability]` 的 interval/over33ms。
 
 ## 8. 剩余候选
 
-- **per-shader 描述符集绑定 memo**：描述符集命中（约 70%）仍然重建完整 `writes[]` 并做 payload 哈希；按 shader 缓存上次的绑定结果可再削 `resolve`/`descset`，预估 0.5–1.5 ms，但需要正确处理 `image_access` 同步与跨批次描述符池重置，风险中高。
-- **技能特效场景取证**：本轮只有营地环境火焰；技能特效需要用户录制路线后，用同一 A/B 流程确认是否还有 GPU overdraw 或额外 pass 放大。
-- **遮挡查询去 PRECISE**：会改变可观察结果（可能影响遮蔽剔除），需用户单独批准；不列入纯性能改动。
-- **`mtl_tex_release` 延迟销毁**：只在场景切换/卸载时出现（营地稳态 `tex_releases=0/帧`），不是特效稳态掉帧的原因；需要数据再决定。
+- **脏页快路覆盖率（P2）**：`image_clean_fast` 约占图像绑定的 18–19%；当前按整个内存池的区间纪元失效，同池任意写会让整池贴图回退慢路。先加 miss 原因计数，再评估 per-image/per-block 写纪元。
+- **剩余 draw 自耗（P4）**：`draw` 顶层仍约 13.2 / 8.6 ms；附件 memo 的约 600 B 拷贝、400 B `pipeline_key` memcmp、顶点/索引快照与 `vkCmdDraw` 发射尚未拆开，需要临时子相位/采样，不盲改。
+- **技能特效场景取证（P3）**：目前只有营地环境火焰；技能特效需要用户录制路线后，用同一 A/B 流程确认是否还有 GPU overdraw 或额外 pass 放大。
+- **遮挡查询去 PRECISE（P5）**：会改变可观察结果（可能影响遮蔽剔除），需用户单独批准；不列入纯性能改动。
+- **`mtl_tex_release` 延迟销毁（P5）**：只在场景切换/卸载时出现（营地稳态 `tex_releases=0/帧`），不是特效稳态掉帧的原因；需要数据再决定。

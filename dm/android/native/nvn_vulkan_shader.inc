@@ -12,6 +12,10 @@ typedef struct shader_entry {
     // Per-texture-element "last check was clean" memo, invalidated by the pending/image/registration epochs.
     shader_dep_texture *dep_textures;
     shader_binding_plan *binding_plan; uint32_t buffer_count,image_count,texel_count,dynamic_count;
+    // 同一着色器上次绑定的真实句柄/偏移/布局；全部相同就复用集合，跳过 payload 打包、哈希与查找。
+    // Real handles/offsets/layouts from this shader's previous bind; identical values reuse the set and skip
+    // payload packing, hashing and lookup.
+    VkDescriptorSet memo_set; uint64_t memo_epoch; uint64_t *memo_values; uint32_t memo_words,memo_capacity;
     VkPipelineLayout compute_layout; VkPipeline compute_pipeline;
     vk_buffer constant_buffer;
     struct shader_entry *next;
@@ -309,6 +313,27 @@ static void descriptor_reserve(shader_entry *s) {
     if(images>descriptor_workspace.image_capacity){descriptor_workspace.images=realloc(descriptor_workspace.images,images*sizeof *descriptor_workspace.images);if(!descriptor_workspace.images)die("Vulkan descriptor images allocation");descriptor_workspace.image_capacity=images;}
     if(texels>descriptor_workspace.texel_capacity){descriptor_workspace.texels=realloc(descriptor_workspace.texels,texels*sizeof *descriptor_workspace.texels);if(!descriptor_workspace.texels)die("Vulkan descriptor texels allocation");descriptor_workspace.texel_capacity=texels;}
 }
+// 集合内容只由工作区里的真实句柄/偏移/布局决定；上一绑定的值全部相同即可原样复用。
+// The set contents are determined solely by the real handles/offsets/layouts in the workspace; when every value
+// matches the previous bind of this shader the same set can be reused as-is.
+static int binding_memo_matches(const shader_entry *s) {
+    if(!s->memo_set||s->memo_epoch!=binding_memo_epoch)return 0;
+    if(s->memo_words!=s->buffer_count*3+s->image_count*3+s->texel_count)return 0;
+    const uint64_t *v=s->memo_values;unsigned k=0;
+    for(unsigned i=0;i<s->buffer_count;i++,k+=3){const VkDescriptorBufferInfo *b=&descriptor_workspace.buffers[i];if(v[k]!=(uintptr_t)b->buffer||v[k+1]!=b->offset||v[k+2]!=b->range)return 0;}
+    for(unsigned i=0;i<s->image_count;i++,k+=3){const VkDescriptorImageInfo *m=&descriptor_workspace.images[i];if(v[k]!=(uintptr_t)m->sampler||v[k+1]!=(uintptr_t)m->imageView||v[k+2]!=(uint64_t)m->imageLayout)return 0;}
+    for(unsigned i=0;i<s->texel_count;i++,k++)if(v[k]!=(uintptr_t)descriptor_workspace.texels[i])return 0;
+    return 1;
+}
+static void binding_memo_store(shader_entry *s,VkDescriptorSet set) {
+    unsigned words=s->buffer_count*3+s->image_count*3+s->texel_count;
+    if(words>s->memo_capacity){uint64_t *values=realloc(s->memo_values,words*sizeof *values);if(!values)die("Vulkan binding memo allocation");s->memo_values=values;s->memo_capacity=words;}
+    uint64_t *v=s->memo_values;unsigned k=0;
+    for(unsigned i=0;i<s->buffer_count;i++){const VkDescriptorBufferInfo *b=&descriptor_workspace.buffers[i];v[k++]=(uintptr_t)b->buffer;v[k++]=b->offset;v[k++]=b->range;}
+    for(unsigned i=0;i<s->image_count;i++){const VkDescriptorImageInfo *m=&descriptor_workspace.images[i];v[k++]=(uintptr_t)m->sampler;v[k++]=(uintptr_t)m->imageView;v[k++]=m->imageLayout;}
+    for(unsigned i=0;i<s->texel_count;i++)v[k++]=(uintptr_t)descriptor_workspace.texels[i];
+    s->memo_set=set;s->memo_words=words;s->memo_epoch=binding_memo_epoch;
+}
 static VkPipelineStageFlags shader_pipeline_stage(const shader_entry *s) {
     switch(s->stage){case 0:return VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;case 1:return VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;case 5:return VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;default:die("Unsupported Vulkan shader stage %u",s->stage);}
 }
@@ -386,10 +411,13 @@ static VkDescriptorSet bind_shader(shader_entry *s,post_op *lifetime,uint32_t *d
     // Perform uploads/access hazard handling on every call before comparing actual payloads; hits never skip GPU synchronization.
     graphics_probe_cs_inputs(s,writes,s->count,dynamic_offsets+dynamic_base,s->dynamic_count);
     uint64_t descset_phase=dm_cpu_phase_begin();
+    if(binding_memo_matches(s)){binding_memo_hits++;dm_cpu_phase_end(DM_CPU_PHASE_DESCSET,descset_phase);return s->memo_set;}
+    binding_memo_misses++;
     VkDescriptorSet set=descriptor_cache_find(s->layout,writes,s->count);
-    if(set){dm_cpu_phase_end(DM_CPU_PHASE_DESCSET,descset_phase);return set;}
+    if(set){binding_memo_store(s,set);dm_cpu_phase_end(DM_CPU_PHASE_DESCSET,descset_phase);return set;}
     set=descriptor_allocate(s->layout);for(unsigned i=0;i<s->count;i++)writes[i].dstSet=set;
     if(s->count)vkUpdateDescriptorSets(device,s->count,writes,0,NULL);descriptor_cache_store(s->layout,set);
+    binding_memo_store(s,set);
     dm_cpu_phase_end(DM_CPU_PHASE_DESCSET,descset_phase);
     return set;
 }

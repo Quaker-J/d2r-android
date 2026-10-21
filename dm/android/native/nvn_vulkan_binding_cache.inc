@@ -39,7 +39,11 @@ static uint64_t descriptor_payload_hash;
 static uint64_t uniform_version_hits,uniform_version_misses,uniform_version_read_bytes,uniform_version_compare_bytes,uniform_version_copy_bytes;
 static uint64_t uniform_compare_fast_hits,uniform_direct_copies;
 static uint64_t descriptor_version_hits,descriptor_version_misses;
+static uint64_t binding_memo_hits,binding_memo_misses,binding_memo_epoch;
 static void binding_cache_reset(void) {
+    // 池 reset 后旧集合不再有效；纪元让所有着色器的 memo 一起失效。
+    // Sets are invalid after a pool reset; the epoch invalidates every shader's memo at once.
+    binding_memo_epoch++;
     memset(uniform_versions,0,sizeof uniform_versions);memset(descriptor_versions,0,sizeof descriptor_versions);
     for(uniform_version_chunk *c=uniform_version_chunks;c;c=c->next)c->used=0;uniform_version_current=uniform_version_chunks;
     for(descriptor_version_chunk *c=descriptor_version_chunks;c;c=c->next)c->used=0;descriptor_version_current=descriptor_version_chunks;
