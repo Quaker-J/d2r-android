@@ -86,6 +86,13 @@ draw 13.98 = bind 7.45（⊃ resolve 6.47 ⊃ ubo 4.04）+ dep 1.41 + draw 自�
 - 命中跳过 payload 打包、FNV 哈希、桶查找与 memcmp；未命中回退原 `descriptor_cache_find/allocate/update` 并刷新 memo。动态偏移不进集合，每次仍照常填写。
 - `binding_cache_reset()` 递增 `binding_memo_epoch`：描述符池 reset 或批资源切换时所有 shader 的 memo 一起失效。memo 与既有 `descriptor_cache` 一样比较裸句柄、随池重置失效，不新增句柄复用风险。
 
+### 3.7 相位计时去 vDSO 开销 + draw 子相位（`nvn_vulkan_cpu_phases.inc`、`nvn_vulkan_draw.inc`、`nvn_vulkan.c`）
+
+- 每帧约有 4.6 万次 `dm_cpu_phase_begin/end`（`ubo` 6.5k、`descset`/`resolve` 各 2.5k、`desc` 1.6k，draw/bind/dep/attach/vertex/pipe/emit 各 1.2k），原实现每次都走 `clock_gettime(CLOCK_MONOTONIC)`（vDSO）。
+- ARM64 改为 `mrs cntvct_el0` 直接读用户态虚拟计数器：启动时用一次 1 ms 睡眠标定 `(ns<<32)/tick` 定点比例，之后每次读数只有几条指令 + 一次 128 位乘加；非 ARM64 保留原时钟。
+- present 路径原有三处用 `clock_gettime` 起点再调用 `dm_cpu_phase_end`（`wait_prior`/`acquire`/`present`）在换钟后会混用两种单位；改为相位单独取起点，日志用的 ns 仍取墙钟。修复前 `acquire`/`present` 曾打印 1e10 ms，`prev_acquire` 3.8e8 ms。
+- 新增 draw 子相位 `attach`/`vertex`/`pipe`/`emit`/`prepare`，用于回答“draw 自耗花在哪”；在快时钟下每个相位只增加约 2 ns。
+
 ## 4. 复核中拦下的正确性问题
 
 两轮并发/生命周期与图形/依赖语义子 agent 复核，修掉：
@@ -175,6 +182,26 @@ draw 13.98 = bind 7.45（⊃ resolve 6.47 ⊃ ubo 4.04）+ dep 1.41 + draw 自�
 - 初始轮 fps/draw 更差，但那是装机后首启（dexopt/热态）：同轮 GPU 13.99→14.65、`fence_wait` 2.22→3.05；移开轮 GPU 反而更低（13.37→13.16）仍无 CPU 收益，故不归因于改动好坏。
 - **结论：撤回全部 P2 改动**，补丁留在 `dm-work/build/logs/p2-block-epochs-20261021.patch`；不再沿“更细/更粗块”继续——前提“慢扫是热点”已被实测否证。
 
+### 5.4 相位计时开销 A/B 与 P4 拆解（2026-10-21 15:47–16:11）
+
+慢时钟诊断包（`3e63e02b`）vs 快时钟包（`435541cf`，修 acquire/present 混用后为 `b8dba0a9`），同机相邻、营地两位置：
+
+| 指标 | 初始慢 | 初始快 | 移开慢 | 移开快 |
+| --- | ---: | ---: | ---: | ---: |
+| fps | 35.14 | **38.82** | 44.16 | **46.73** |
+| `thread_cpu` mean ms | 17.11 | **16.15** | 17.47 | **16.40** |
+| `draw` ms | 14.11 | **11.12** | 8.89 | **8.39** |
+| `bind` | 6.75 | **4.95** | 3.81 | **3.39** |
+| `ubo` | 3.42 | **1.43** | 2.05 | **1.23** |
+| `resolve` | 6.03 | **4.37** | 3.47 | **3.09** |
+| `descset` | 0.88 | **0.64** | 0.58 | **0.48** |
+
+- 相位数值同步下降，是因为它们不再把“读时钟本身”算进各自阶段；这是同一份工作量的更真实测量。
+- 修复 acquire/present 混用后复测（`b8dba0a9`）：`acquire` 0.107/0.098、`present` 0.339/0.297、`present_total` 1.479/0.561，`prev_acquire` 从 3.8e8 ms 归零；初始 38.10 FPS / `thread_cpu` 17.91，移开 48.89 / 15.20；无 SIGILL/crash，截图一致。
+- P4 子相位（快时钟，每帧 / 每 draw）：`attach` 0.118（0.10 µs）/0.090（0.11）；`vertex` 0.927（0.75）/0.702（0.89）；`pipe` 0.072（0.06）/0.057（0.07）；`emit` 1.129（0.92）/0.877（1.11）；`prepare` 2.479（2.01）/1.628（2.06）。
+- 四个真实子段合计仅约 2.2 ms/帧（draw 的 19–22%），`vertex`/`emit` 已接近 Mali 用户态驱动的逐绘制下限；`prepare` 与 `[vulkan-frame-stability] ring` 同量级，是 chunk ring 的 CPU/GPU 背压，不是可删的纯 CPU 自耗。
+- 结论：P4 剩余 draw 自耗没有可安全切除的大块；本轮净收益来自相位计时去 vDSO 调用。
+
 ## 6. 改动文件
 
 - `dm/android/native/nvn_vulkan_binding_cache.inc`：UBO 快路、范围化 known-copy 判断、计数、binding memo 纪元与计数。
@@ -215,12 +242,14 @@ adb shell am force-stop org.d2r.android.port
 adb shell input keyevent 223
 ```
 
-看哪些字段：`[vulkan-cpu-phases]` 的 `draw/bind/ubo/dep/resolve/descset`、`[vulkan-bindings]` 的 `ubo_compare_fast/direct`、`tex/samp_read_fast`、`image_clean_fast`、`dep_tex_memo`、`binding_memo hits/miss`、`[vulkan-frame-stability]` 的 interval/over33ms。
+看哪些字段：`[vulkan-cpu-phases]` 的 `draw/bind/ubo/dep/resolve/descset` 与 draw 子相位 `attach/vertex/pipe/emit/prepare`、`[vulkan-bindings]` 的 `ubo_compare_fast/direct`、`tex/samp_read_fast`、`image_clean_fast`、`dep_tex_memo`、`binding_memo hits/miss`、`[vulkan-frame-stability]` 的 interval/over33/ring。
 
 ## 8. 剩余候选
 
 - **脏页快路覆盖率（P2，已否证）**：分块写纪元把 `slow_clean` 从 555/339 次/帧降到 1，但 `resolve` 无收益；慢扫不是瓶颈，见 §5.3。补丁保留未合并。
-- **剩余 draw 自耗（P4）**：`draw` 顶层仍约 13.2 / 8.6 ms；附件 memo 的约 600 B 拷贝、400 B `pipeline_key` memcmp、顶点/索引快照与 `vkCmdDraw` 发射尚未拆开，需要临时子相位/采样，不盲改。
-- **技能特效场景取证（P3）**：目前只有营地环境火焰；技能特效需要用户录制路线后，用同一 A/B 流程确认是否还有 GPU overdraw 或额外 pass 放大。
-- **遮挡查询去 PRECISE（P5）**：会改变可观察结果（可能影响遮蔽剔除），需用户单独批准；不列入纯性能改动。
-- **`mtl_tex_release` 延迟销毁（P5）**：只在场景切换/卸载时出现（营地稳态 `tex_releases=0/帧`），不是特效稳态掉帧的原因；需要数据再决定。
+- **draw 自耗（P4，已完成拆解）**：attach/vertex/pipe/emit 合计约 2.2 ms/帧，vertex/emit 已接近 Mali 驱动逐绘制下限；`prepare` 是 chunk ring 背压而非纯 CPU 自耗，见 §5.4。没有可安全切除的大块。
+- **技能特效（P3，用户实测暂跳过）**：野外空地原地放技能与不放技能，帧数/CPU/GPU 无显著差异，技能本身不构成额外成本；真实多怪战斗再议。
+- **动态分辨率（需批准）**：Android 上 `mtl_presented_time()` 恒 0，画质“自动”档从不降档；修好会在掉帧时自动降分辨率，收益可能最大但改变可观察画面。
+- **遮挡查询去 PRECISE（需批准）**：会改变可观察结果（可能影响遮蔽剔除）；不列入纯性能改动。
+- **chunk ring/批提交（需设计）**：`prepare` 与 `ring` 同量级的等待是 CPU/GPU 流水线背压；更大批会降低提交次数但增加延迟/内存，需单独验证。
+- **`mtl_tex_release` 延迟销毁**：只在场景切换/卸载时出现（营地稳态 `tex_releases=0/帧`），不是特效稳态掉帧的原因。
