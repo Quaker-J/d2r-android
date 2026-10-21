@@ -73,6 +73,21 @@ int dm_android_guest_heap_copy_owned(uintptr_t source, void *destination, size_t
 done:
     errno = saved_errno; return copied;
 }
+int dm_android_guest_heap_compare_owned(uintptr_t source, const void *expected, size_t size) {
+    int saved_errno = errno, equal = -1;
+    if (!size || !expected || !atomic_load_explicit(&g_mem_ready, memory_order_acquire)) goto done;
+    if (pthread_rwlock_tryrdlock(&g_heap_map_lock)) goto done;
+    uintptr_t base = (uintptr_t)g_heap;
+    size_t current = atomic_load_explicit(&g_heap_cur, memory_order_relaxed);
+    // 比较与复制共用同一把权限读锁：只有租约仍持有时才允许直接读客体源指针。
+    // Compare and copy share the same permission read lock: the guest source may be read directly only while
+    // the lease still holds.
+    if (g_heap_leases_enabled && source >= base && size <= current && source - base <= current - size)
+        equal = memcmp((const void *)source, expected, size) ? 0 : 1;
+    pthread_rwlock_unlock(&g_heap_map_lock);
+done:
+    errno = saved_errno; return equal;
+}
 #endif
 static uint8_t *g_alias; static size_t g_alias_cap;
 static uint8_t *g_stack; static size_t g_stack_cap;

@@ -11,6 +11,11 @@ int nvn_dirty_tracked(const void *addr, size_t len);
 void nvn_dirty_protect(const void *addr, size_t len);              // 覆盖页设只读 | Set the covered pages read-only
 uint64_t nvn_dirty_now(void);                                      // 当前代号：上传前取，作为该份内容的戳 | Current generation: taken before upload, as the stamp of that content
 int nvn_dirty_since(const void *addr, size_t len, uint64_t stamp); // 覆盖页在戳之后被写过 → 1 | Covered pages were written after the stamp -> 1
+// 区间写纪元：登记时取 token+epoch；此后 epoch 未变即该区间没有任何写，不必逐页扫描。
+// Range write epoch: take token+epoch at registration time; an unchanged epoch proves no write in that
+// range since then, so callers can skip the per-page scan.
+int nvn_dirty_range_epoch(const void *addr, size_t len, uint64_t *token, uint64_t *epoch);
+int nvn_dirty_range_epoch_unchanged(uint64_t token, uint64_t epoch, const void *addr, size_t len);
 typedef enum { NVN_DIRTY_DIAG_INVALID = 0, NVN_DIRTY_DIAG_UNTRACKED = 1, NVN_DIRTY_DIAG_TRACKED = 2 } nvn_dirty_diag_status;
 typedef struct {
     uint64_t page_size, total_pages;

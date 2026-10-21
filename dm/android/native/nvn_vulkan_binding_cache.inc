@@ -37,6 +37,7 @@ static uint64_t *descriptor_payload;
 static size_t descriptor_payload_words,descriptor_payload_capacity;
 static uint64_t descriptor_payload_hash;
 static uint64_t uniform_version_hits,uniform_version_misses,uniform_version_read_bytes,uniform_version_compare_bytes,uniform_version_copy_bytes;
+static uint64_t uniform_compare_fast_hits,uniform_direct_copies;
 static uint64_t descriptor_version_hits,descriptor_version_misses;
 static void binding_cache_reset(void) {
     memset(uniform_versions,0,sizeof uniform_versions);memset(descriptor_versions,0,sizeof descriptor_versions);
@@ -74,6 +75,37 @@ static VkDescriptorBufferInfo uniform_read_cached(uintptr_t address,uint32_t siz
 }
 static VkDescriptorBufferInfo uniform_read_cached_read(uintptr_t address,uint32_t size) {
     if(!address||!size||size>65536||size>UINTPTR_MAX-address)die("Vulkan uniform version bounds");
+    // 本批没有在途已知复制时，客体源就是当前内容：直接与上次的 arena 版本比较，命中不复制，变更直接写新槽。
+    // With no known copy in flight the guest source is current: compare it against the cached arena version,
+    // so a hit copies nothing and a change goes straight into a new slot.
+    if(snapshot_heap_compare_available()&&async_no_known_copy_overlap(address,size)){
+        unsigned fast_bucket=read_bucket(address,size)&2047;uniform_version *fast_entry=uniform_versions[fast_bucket];
+        while(fast_entry&&(fast_entry->address!=address||fast_entry->size!=size))fast_entry=fast_entry->next;
+        if(fast_entry){
+            int equal=dm_android_guest_heap_compare_owned(address,fast_entry->mapped,size);
+            if(equal==1){
+                uniform_version_read_bytes+=size;uniform_version_compare_bytes+=size;uniform_version_hits++;
+                uniform_read_stats.heap_calls++;uniform_read_stats.heap_bytes+=size;uniform_compare_fast_hits++;
+                snapshot_read_account(size);return fast_entry->info;
+            }
+            if(equal==0){
+                if(dm_android_guest_heap_copy_owned&&dm_android_guest_heap_copy_owned(address,uniform_read_scratch,size)==1){
+                    uint8_t *mapped;VkDescriptorBufferInfo fast_info=uniform_allocate_overwrite(size,&mapped);memcpy(mapped,uniform_read_scratch,size);
+                    uniform_version_read_bytes+=size;uniform_version_compare_bytes+=size;uniform_version_copy_bytes+=size;uniform_version_misses++;
+                    uniform_read_stats.heap_calls++;uniform_read_stats.heap_bytes+=size;uniform_direct_copies++;
+                    fast_entry->mapped=mapped;fast_entry->info=fast_info;snapshot_read_account(size);return fast_info;
+                }
+            }
+        }else{
+            if(dm_android_guest_heap_copy_owned&&dm_android_guest_heap_copy_owned(address,uniform_read_scratch,size)==1){
+                uint8_t *mapped;VkDescriptorBufferInfo fast_info=uniform_allocate_overwrite(size,&mapped);memcpy(mapped,uniform_read_scratch,size);
+                uniform_version_read_bytes+=size;uniform_version_copy_bytes+=size;uniform_version_misses++;
+                uniform_read_stats.heap_calls++;uniform_read_stats.heap_bytes+=size;uniform_direct_copies++;
+                fast_entry=uniform_version_new();fast_entry->address=address;fast_entry->size=size;fast_entry->next=uniform_versions[fast_bucket];uniform_versions[fast_bucket]=fast_entry;
+                fast_entry->mapped=mapped;fast_entry->info=fast_info;snapshot_read_account(size);return fast_info;
+            }
+        }
+    }
     // queue_lock 串行复用 scratch；每次安全读取和 FIFO overlay 后才按实际字节复用，不依赖页保护或旧 stamp。
     // queue_lock serializes scratch reuse; compare fresh safe-read/FIFO-overlay bytes without relying on page protection or old stamps.
     if(uniform_read_current(address,size))die("Unreadable Vulkan cached uniform");uniform_version_read_bytes+=size;

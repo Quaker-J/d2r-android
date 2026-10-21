@@ -35,7 +35,7 @@ enum { BUSY_WAIT_MS = 2000 };
 // 跟踪区间 = 各内存池（MemoryPoolInitialize 登记）。池销毁后复用 live=0 的槽，信号处理里无锁扫描。
 // Tracked ranges = the memory pools (registered by MemoryPoolInitialize). After a pool is destroyed its live=0 slot is reused; the signal handler scans without locks.
 #define MAX_RANGE 4096   // 原为 256：内存池多于它时超出的池不跟踪，里面的贴图每次取用都当成脏的重传（暗黑实测峰值见内存读数行的「内存池」；塞尔达约 300 个，踩过）。扫描只到已用的槽数，容量大不增加开销 | was 256: with more memory pools than that the excess pools are untracked and their textures are treated as dirty and re-uploaded on every use (for Diablo's measured peak see "memory pools" in the memory readout line; Zelda has about 300 and hit this). The scan only covers slots in use, so a larger capacity costs nothing
-typedef struct { uintptr_t base, end; _Atomic uint8_t *state; _Atomic uint64_t *gen; size_t cap; _Atomic int live; uint64_t incarnation; int snapshot_disabled; } range_t;
+typedef struct { uintptr_t base, end; _Atomic uint8_t *state; _Atomic uint64_t *gen; size_t cap; _Atomic int live; uint64_t incarnation, token; _Atomic uint64_t epoch; int snapshot_disabled; } range_t;
 static range_t g_r[MAX_RANGE];
 static _Atomic int g_nr;
 static uintptr_t g_pg, g_shift;
@@ -46,6 +46,7 @@ static _Atomic int g_live, g_live_peak;   // 在册的池数与峰值（内存�
 void nvn_dirty_stat(int *live, int *peak, int *cap) { *live = atomic_load(&g_live); *peak = atomic_load(&g_live_peak); *cap = MAX_RANGE; }
 static _Atomic int g_overflow_logged;
 static pthread_mutex_t g_slot_mu = PTHREAD_MUTEX_INITIALIZER;   // 建池 / 销池（客体线程，可能并发）互斥选槽；缺页处理路径不碰它 | Pool creation / destruction (guest threads, possibly concurrent) pick slots under a mutex; the page-fault handling path does not touch it
+static _Atomic uint64_t g_range_table_epoch;   // 登记/销毁区间的 seqlock，保护无锁读者看到的 base/end/incarnation/token 一致
 static uint64_t g_range_incarnation;
 static _Atomic uint64_t g_mp_calls, g_mp_pages, g_mp_ticks;   // 本模块的 mprotect：调用次数、覆盖页数、耗时（mach 时基，缺页路径里也安全） | This module's mprotect: call count, pages covered, time spent (mach timebase, safe in the page-fault path too)
 static void mp(uintptr_t a, size_t len, int prot) {
@@ -75,9 +76,16 @@ static range_t *find(uintptr_t a) {
     return NULL;
 }
 static void unprotect_page(range_t *r, uintptr_t p) {   // 调用方已把状态从 PROT 改成 BUSY | The caller has already changed the state from PROT to BUSY
+    // 区间纪元是奇偶 seqlock：改保护前先置奇，gen/state 落地后才置偶。读者只采信稳定偶值，
+    // 因此不会把“纪元已变、gen 尚未写”的中间态当成干净。
+    // The range epoch is an odd/even seqlock: mark odd before changing protection and even only after
+    // gen/state land. Readers trust only a stable even value, so the "epoch advanced, gen not yet written"
+    // window can never be mistaken for clean.
+    atomic_fetch_add_explicit(&r->epoch, 1, memory_order_release);
     mp(r->base + (p << g_shift), g_pg, PROT_READ | PROT_WRITE);
     atomic_store(&r->gen[p], atomic_fetch_add(&g_now, 1) + 1);
     atomic_store(&r->state[p], PG_NONE);
+    atomic_fetch_add_explicit(&r->epoch, 1, memory_order_release);
 }
 static int on_fault(void *addr, int is_write, void *uc) {
     (void)uc;
@@ -109,6 +117,7 @@ void nvn_dirty_add_range(const void *mem, size_t size) {
     if (!inited) { inited = 1; g_pg = (uintptr_t)getpagesize(); g_shift = __builtin_ctzl(g_pg); mach_timebase_info(&g_tb); dm_fault_hook_register(on_fault); dm_guest_write_prep_register(prep_write); }
     atomic_fetch_add(&g_adds_total, 1);
     pthread_mutex_lock(&g_slot_mu);
+    atomic_fetch_add_explicit(&g_range_table_epoch, 1, memory_order_release);
     int n = atomic_load(&g_nr);
     int slot = -1;
     for (int i = 0; i < n; i++) if (!atomic_load_explicit(&g_r[i].live, memory_order_acquire)) { slot = i; break; }
@@ -116,6 +125,7 @@ void nvn_dirty_add_range(const void *mem, size_t size) {
         if (n >= MAX_RANGE) {
             int expected = 0;
             if (atomic_compare_exchange_strong(&g_overflow_logged, &expected, 1)) LOG("【红】脏页跟踪区间已满（%d），池 %p 不跟踪", MAX_RANGE, mem);
+            atomic_fetch_add_explicit(&g_range_table_epoch, 1, memory_order_release);
             pthread_mutex_unlock(&g_slot_mu); return;
         }
         slot = n;
@@ -138,16 +148,22 @@ void nvn_dirty_add_range(const void *mem, size_t size) {
     r->base = base; r->end = end; r->state = state; r->gen = gen;
     if (!++g_range_incarnation) die("dirty range incarnation overflow");
     r->incarnation = g_range_incarnation; r->snapshot_disabled = 0;
+    atomic_store_explicit(&r->epoch, 0, memory_order_release);
+    if (slot > 4095) die("dirty range slot overflow");
+    r->token = (g_range_incarnation << 12) | (unsigned)slot;
     if (slot == n) atomic_store(&g_nr, n + 1);
     atomic_store_explicit(&r->live, 1, memory_order_release);
+    atomic_fetch_add_explicit(&g_range_table_epoch, 1, memory_order_release);
     pthread_mutex_unlock(&g_slot_mu);
 }
 // 池销毁：先把仍受保护的页还原成可写（池内存归还游戏后可能另作他用），再标失效
 // Pool destruction: first restore still-protected pages to writable (the pool memory may be reused for something else once returned to the game), then mark invalid
 void nvn_dirty_remove_range(const void *mem) {
     pthread_mutex_lock(&g_slot_mu);
+    atomic_fetch_add_explicit(&g_range_table_epoch, 1, memory_order_release);
     range_t *r = find((uintptr_t)mem);
     if (r) { prep_write((void *)r->base, r->end - r->base); atomic_store_explicit(&r->live, 0, memory_order_release); atomic_fetch_sub(&g_live, 1); }
+    atomic_fetch_add_explicit(&g_range_table_epoch, 1, memory_order_release);
     pthread_mutex_unlock(&g_slot_mu);
 }
 int nvn_dirty_tracked(const void *addr, size_t len) {
@@ -180,6 +196,49 @@ int nvn_dirty_since(const void *addr, size_t len, uint64_t stamp) {
     for (uintptr_t i = p; i <= q; i++) if (atomic_load(&r->gen[i]) > stamp) return 1;   // 上传前最后一次写的代号 ≤ 戳；之后的写必 > 戳 | The generation of the last write before upload is <= the stamp; any later write must be > the stamp
     return 0;
 }
+// 只按区间写纪元回答“自上次取样后有没有写过”，不读页表；调用方仍须先确认这批内容确实可复用。
+// Answer "any write since the sampled epoch" from the range epoch alone, without touching the page table; the
+// caller must still have established that the sampled contents are reusable.
+int nvn_dirty_range_epoch(const void *addr, size_t len, uint64_t *token, uint64_t *epoch) {
+    int saved_errno = errno, ok = 0;
+    uintptr_t a = (uintptr_t)addr;
+    if (token) *token = 0;
+    uint64_t table = atomic_load_explicit(&g_range_table_epoch, memory_order_acquire);
+    int keep_token = 0;
+    if (token && epoch && len && len <= UINTPTR_MAX - a && !(table & 1)) {
+        range_t *r = find(a);
+        if (r && a >= r->base && a <= r->end && len <= r->end - a) {
+            // token 即使纪元为奇也返回：调用方靠它识别池销毁后的槽复用，不能因为一次进行中的写而丢失身份。
+            // Return the token even when the epoch is odd: callers use it to detect slot reuse after pool
+            // destruction, and an in-progress write must not erase that identity.
+            keep_token = 1;
+            *token = r->token;
+            uint64_t value = atomic_load_explicit(&r->epoch, memory_order_acquire);
+            if (!(value & 1) && table == atomic_load_explicit(&g_range_table_epoch, memory_order_acquire)) { *epoch = value; ok = 1; }
+            else if (table != atomic_load_explicit(&g_range_table_epoch, memory_order_acquire)) keep_token = 0;
+        }
+    }
+    if (!keep_token && token) *token = 0;
+    errno = saved_errno; return ok;
+}
+int nvn_dirty_range_epoch_unchanged(uint64_t token, uint64_t epoch, const void *addr, size_t len) {
+    int saved_errno = errno, unchanged = 0;
+    uintptr_t a = (uintptr_t)addr;
+    uint64_t table = atomic_load_explicit(&g_range_table_epoch, memory_order_acquire);
+    if (token && len && !(epoch & 1) && !(table & 1)) {
+        unsigned slot = (unsigned)(token & 4095);
+        int n = atomic_load(&g_nr);
+        if (slot < (unsigned)n) {
+            range_t *r = &g_r[slot];
+            if (atomic_load_explicit(&r->live, memory_order_acquire) && r->incarnation == (token >> 12) &&
+                a >= r->base && a <= r->end && len <= r->end - a) {
+                uint64_t value = atomic_load_explicit(&r->epoch, memory_order_acquire);
+                unchanged = !(value & 1) && value == epoch && table == atomic_load_explicit(&g_range_table_epoch, memory_order_acquire);
+            }
+        }
+    }
+    errno = saved_errno; return unchanged;
+}
 // 新 GPU-only 谱系单独持普通元数据事务；信号路径不读取 token，也不取得它的锁。
 // A separate normal-thread metadata transaction serves the new GPU-only lineage; signal paths neither inspect its token nor acquire its lock.
 static _Thread_local struct { nvn_dirty_snapshot_plan *plan; range_t *range; uintptr_t first, last; } g_snapshot_tx;
@@ -200,8 +259,10 @@ static int snapshot_protect_run(range_t *r, uintptr_t first, uintptr_t end, nvn_
         if (snapshot_mp_checked(address, bytes, PROT_READ | PROT_WRITE)) die("dirty snapshot protection rollback failed: address=%p size=%zu errno=%d", (void *)address, bytes, errno);
         // 回滚也解除过原 PROT 页；发布新代数使原 CPU 缓存拒绝旧戳，不能只禁新 GPU 谱系。
         // Rollback also unprotects formerly PROT pages: publish a fresh generation so old CPU caches reject their stamps, not just the new GPU lineage.
+        atomic_fetch_add_explicit(&r->epoch, 1, memory_order_release);
         uint64_t generation = atomic_fetch_add(&g_now, 1) + 1;
         for (uintptr_t p = first; p < end; p++) { atomic_store(&r->gen[p], generation); atomic_store(&r->state[p], PG_NONE); }
+        atomic_fetch_add_explicit(&r->epoch, 1, memory_order_release);
         return 0;
     }
     for (uintptr_t p = first; p < end; p++) atomic_store(&r->state[p], PG_PROT);
@@ -293,6 +354,7 @@ static _Atomic uint64_t g_publish_calls, g_publish_bytes, g_publish_pages, g_pub
 static void publish_unprotect_run(range_t *r, uintptr_t first, uintptr_t end) {
     if (first == end) return;
     uintptr_t address = r->base + (first << g_shift); size_t bytes = (end - first) << g_shift;
+    atomic_fetch_add_explicit(&r->epoch, 1, memory_order_release);
     uint64_t started = mach_absolute_time();
     int result = mprotect((void *)address, bytes, PROT_READ | PROT_WRITE), error = errno;
     uint64_t finished = mach_absolute_time();
@@ -307,6 +369,7 @@ static void publish_unprotect_run(range_t *r, uintptr_t first, uintptr_t end) {
     // Publish an unprotect generation before NONE; completion publishes another generation for the entire query after actual stores.
     uint64_t generation = atomic_fetch_add(&g_now, 1) + 1;
     for (uintptr_t p = first; p < end; p++) { atomic_store(&r->gen[p], generation); atomic_store(&r->state[p], PG_NONE); }
+    atomic_fetch_add_explicit(&r->epoch, 1, memory_order_release);
     atomic_fetch_add(&g_preps, end - first); atomic_fetch_add(&g_publish_pages, end - first);
 }
 int nvn_dirty_publish_copy(void *destination, const void *owned_readable_source, size_t size) {
@@ -334,9 +397,11 @@ int nvn_dirty_publish_copy(void *destination, const void *owned_readable_source,
     // 原所有 hooks 仍恰好执行一次；本模块此时已经 NONE，不再逐页 mprotect。当前 hooks 不重入 queue/metadata。
     // Run all original hooks exactly once: our pages are now NONE, avoiding per-page mprotect. Current hooks do not reenter queue/metadata.
     dm_guest_write_prepare(destination, size);
+    atomic_fetch_add_explicit(&r->epoch, 1, memory_order_release);
     memcpy(destination, owned_readable_source, size);
     uint64_t generation = atomic_fetch_add(&g_now, 1) + 1;
     for (uintptr_t p = first; p <= last; p++) atomic_store(&r->gen[p], generation);
+    atomic_fetch_add_explicit(&r->epoch, 1, memory_order_release);
     atomic_fetch_add(&g_publish_calls, 1); atomic_fetch_add(&g_publish_bytes, size); copied = 1;
 unlock:
     pthread_mutex_unlock(&g_slot_mu);

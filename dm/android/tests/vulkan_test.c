@@ -26,6 +26,8 @@ void nvn_dirty_protect(const void *addr, size_t len) { (void)len;if(addr==tracke
 int nvn_dirty_tracked(const void *addr, size_t len) { (void)len; return addr==tracked_vertices; }
 int nvn_dirty_since(const void *addr, size_t len, uint64_t stamp) { (void)len; return addr==tracked_vertices && dirty_generation>stamp; }
 uint64_t nvn_dirty_now(void) { return dirty_generation; }
+int nvn_dirty_range_epoch(const void *addr,size_t len,uint64_t *token,uint64_t *epoch) { (void)addr;(void)len;(void)token;(void)epoch;return 0; }
+int nvn_dirty_range_epoch_unchanged(uint64_t token,uint64_t epoch,const void *addr,size_t len) { (void)token;(void)epoch;(void)addr;(void)len;return 0; }
 void *front_metal_layer(void) { return NULL; }
 static unsigned char packets[512];
 static size_t used;

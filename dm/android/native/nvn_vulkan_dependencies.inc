@@ -1,6 +1,6 @@
 // Vulkan 资源分配之前解决客体内存读取依赖；不在绑定途中提交或提前公布 GPU 结果。
 // Resolve guest-memory read dependencies before allocating Vulkan resources; never submit during binding or publish GPU results early.
-static uint64_t dependency_flushes;
+static uint64_t dependency_flushes,dependency_texture_memo_hits;
 enum {
     DEP_NONE,DEP_UBO,DEP_SSBO,DEP_COMPUTE_UBO_POINTER,DEP_TEXEL,DEP_SHADER_TEXTURE,
     DEP_INDEX,DEP_VERTEX,DEP_COPY_BUFFER_SOURCE,DEP_TEXTURE,DEP_COPY_TEXTURE_SOURCE,DEP_COPY_TEXTURE_DESTINATION,DEP_COUNT
@@ -129,6 +129,11 @@ static int dependencies_gpu_unknown(uintptr_t address,uint64_t size,uint64_t ali
 static int dependencies_gpu_unknown_reason(uintptr_t address,uint64_t size,uint64_t alignment,int *result);
 static int dependencies_shader_unknown(const shader_entry *shader) {
     if(!shader)return 0;
+    // 三个写者各自推进纪元：新 GPU 写登记、图像对象/填充状态、描述符注册。三者逐项比较，不能合并成
+    // 一个异或值——不同方向的变化可能恰好抵消。
+    // Three writers advance the epochs: new GPU-write registration, image object/fill state, descriptor
+    // registration. Compare them separately; combining them with XOR could cancel opposing changes.
+    uint64_t descriptor_epoch=atomic_load_explicit(&descriptor_read_epoch,memory_order_acquire);
     for(unsigned i=0;i<shader->count;i++){
         const shader_binding *binding=&shader->bindings[i];
         const shader_binding_plan *plan=shader->binding_plan?&shader->binding_plan[i]:NULL;
@@ -167,8 +172,11 @@ static int dependencies_shader_unknown(const shader_entry *shader) {
             // Packaged storage images also read CPU initial contents; ordinary GPU storage images remain direct consumers.
             for(unsigned j=0;j<binding->count;j++){
                 uint32_t handle=shader_handle(binding,shader->stage,j);
+                unsigned slot=plan?plan->offset+j:0;shader_dep_texture *memo=(plan&&shader->dep_textures)?&shader->dep_textures[slot]:NULL;
+                if(memo&&memo->clean&&memo->handle==handle&&memo->pending_epoch==pending_unknown_epoch&&memo->image_epoch==image_state_epoch&&memo->descriptor_epoch==descriptor_epoch){dependency_texture_memo_hits++;continue;}
                 texture_descriptor descriptor=descriptor_texture(handle&0xfffff);
                 if(descriptor.valid&&(binding->kind!=4||(descriptor.texture.has_layout&&descriptor.texture.mem))&&dependencies_texture_unknown(&descriptor.texture))return DEP_SHADER_TEXTURE;
+                if(memo){memo->handle=handle;memo->pending_epoch=pending_unknown_epoch;memo->image_epoch=image_state_epoch;memo->descriptor_epoch=descriptor_epoch;memo->clean=1;}
             }
         }
     }

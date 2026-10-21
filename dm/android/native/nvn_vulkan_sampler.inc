@@ -32,7 +32,7 @@ static void sampler_compare_note_locked(int id,uint32_t type,const sampler_descr
     static unsigned notes;const samp_par *parameters=&descriptor->parameters;
     if(notes<12&&!!(type&1024)!=!!parameters->cmp_mode){notes++;LOG("[vulkan-sampler] compare mismatch id=%d reflected_shadow=%u registered_compare=%u func=%u",id,!!(type&1024),!!parameters->cmp_mode,(unsigned)parameters->cmp_func);}
 }
-static VkSampler sampler_get_for_type(int id,uint32_t type) {
+static VkSampler sampler_get_for_type_slow(int id,uint32_t type) {
     pthread_mutex_lock(&descriptor_lock);sampler_descriptor *descriptor=id>=0&&id<sampler_capacity&&sampler_descriptors[id].valid?&sampler_descriptors[id]:NULL;
     sampler_compare_note_locked(id,type,descriptor);
     if(descriptor&&descriptor->sampler){VkSampler sampler=descriptor->sampler;sampler_reuses++;pthread_mutex_unlock(&descriptor_lock);return sampler;}
@@ -50,5 +50,23 @@ static VkSampler sampler_get_for_type(int id,uint32_t type) {
         border_notes++;LOG("[vulkan-sampler] id=%d wrap=%u,%u,%u border=%g,%g,%g,%g canonical=%u compare=%u/%u",id,(unsigned)parameters.ws,(unsigned)parameters.wt,(unsigned)parameters.wr,parameters.border[0],parameters.border[1],parameters.border[2],parameters.border[3],key.border,key.compare,key.compare_op);
     }
     pthread_mutex_unlock(&descriptor_lock);return entry->sampler;
+}
+typedef struct { int id; uint32_t type; uint64_t epoch; VkSampler sampler; } sampler_read_cache_entry;
+static sampler_read_cache_entry sampler_read_caches[256];
+static VkSampler sampler_get_for_type(int id,uint32_t type) {
+    uint64_t epoch=atomic_load_explicit(&descriptor_read_epoch,memory_order_acquire);
+    if(!(epoch&1)&&id>=0){
+        sampler_read_cache_entry *entry=&sampler_read_caches[(unsigned)id&255];
+        if(entry->id==id&&entry->type==type&&entry->epoch==epoch&&entry->sampler){
+            VkSampler sampler=entry->sampler;
+            if(descriptor_read_stable(epoch)){sampler_read_cache_hits++;return sampler;}
+        }
+    }
+    VkSampler sampler=sampler_get_for_type_slow(id,type);
+    if(sampler&&descriptor_read_stable(epoch)){
+        sampler_read_cache_entry *entry=&sampler_read_caches[(unsigned)id&255];
+        entry->id=id;entry->type=type;entry->epoch=epoch;entry->sampler=sampler;sampler_read_cache_misses++;
+    }
+    return sampler;
 }
 static VkSampler sampler_get(int id) {return sampler_get_for_type(id,0);}

@@ -7,6 +7,10 @@ typedef struct image_entry {
     // The image's actual layout, written only by image_access. calloc's zero is UNDEFINED, so creation assigns it.
     VkImageLayout layout;
     uint64_t source_stamp,source_hash,source_seen;int source_valid,source_tracked;
+    // 上传/取样时记下所在脏页区间的 token 与写纪元；纪元不变即可跳过整张贴图的逐页扫描。
+    // Token and write epoch of the covering dirty range at upload/sample time; an unchanged epoch skips the
+    // per-page scan of the whole texture.
+    uint64_t dirty_token,dirty_epoch;int dirty_epoch_valid;
     VkPipelineStageFlags last_stage;VkAccessFlags last_access;int gpu_written;
     cached_image_view *views;
     struct image_entry *next,*hash_next;
@@ -18,6 +22,23 @@ static texture_descriptor *texture_descriptors;
 static sampler_descriptor *sampler_descriptors;
 static int texture_capacity, sampler_capacity;
 static pthread_mutex_t descriptor_lock = PTHREAD_MUTEX_INITIALIZER;
+// 描述符注册的 seqlock：写者在锁内先置奇再置偶，读者无锁取一份副本并复核纪元。
+// 贴图/采样器句柄在一次绘制里会被反复查询，这里把锁从每次绑定降到每次真实注册。
+// Seqlock for descriptor registration: writers mark odd then even under the lock, while readers take a
+// lock-free copy and re-check the epoch. Texture/sampler handles are queried repeatedly per draw, so this
+// reduces the lock to actual registrations.
+static _Atomic uint64_t descriptor_read_epoch;
+static inline void descriptor_write_begin(void) { atomic_fetch_add_explicit(&descriptor_read_epoch, 1, memory_order_release); }
+static inline void descriptor_write_end(void) { atomic_fetch_add_explicit(&descriptor_read_epoch, 1, memory_order_release); }
+static inline int descriptor_read_stable(uint64_t epoch) {
+    return !(epoch & 1) && atomic_load_explicit(&descriptor_read_epoch, memory_order_acquire) == epoch;
+}
+static uint64_t texture_read_cache_hits,texture_read_cache_misses,sampler_read_cache_hits,sampler_read_cache_misses;
+static uint64_t image_clean_epoch_hits,image_clean_epoch_misses;
+// 依赖预检的贴图 clean 记忆要感知图像对象/填充状态变化；这里只做粗粒度失效，宁可多查一次。
+// The texture-dependency clean memo must notice image object/fill-state changes; this coarse invalidation is
+// deliberately conservative: a false invalidation only costs one extra check.
+static uint64_t image_state_epoch;
 static uint64_t texture_uploads, render_passes, draw_count;
 static uint64_t image_barriers;
 static VkImageView image_view_get(image_entry *e,VkImageViewType type,VkImageSubresourceRange range) {
@@ -188,16 +209,23 @@ static image_entry *image_get(const tex_t *t) {
         vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,NULL,0,NULL,1,&b);
         e->layout=VK_IMAGE_LAYOUT_GENERAL;
     }
-    e->next=image_list;image_list=e;e->hash_next=image_index[bucket];image_index[bucket]=e;return e;
+    e->next=image_list;image_list=e;e->hash_next=image_index[bucket];image_index[bucket]=e;image_state_epoch++;return e;
 }
 // GPU 内容与 packaged CPU 源是两条独立版本；GPU 写不能把后来的 CPU 脏写永久屏蔽。
 // Track GPU contents separately from packaged CPU sources; GPU writes must not suppress subsequent real CPU changes.
 static uint64_t image_source_hash(const uint8_t *source,uint64_t size) {
     uint64_t hash=14695981039346656037ull;for(uint64_t i=0;i<size;i++)hash=(hash^source[i])*1099511628211ull;return hash;
 }
-static void image_source_baseline(image_entry *e,const uint8_t *source,uint64_t stamp) {
-    const tex_t *t=&e->texture;if(!t->has_layout||!t->mem)return;
+static void image_source_baseline(image_entry *e,const uint8_t *source,uint64_t stamp,uint64_t dirty_token,uint64_t dirty_epoch,int dirty_have) {
+    const tex_t *t=&e->texture;if(!t->has_layout||!t->mem){e->dirty_epoch_valid=0;return;}
     e->source_stamp=stamp;e->source_seen=stamp;e->source_tracked=nvn_dirty_tracked(t->mem,t->L.size);e->source_valid=1;
+    // 纪元必须在读取之前采样；只有读完整张图后仍未被写打断，才能把它当作下次的快路基线。
+    // The epoch must be sampled before the read; only an uninterrupted read may become the next fast-path baseline.
+    e->dirty_epoch_valid=e->source_tracked&&dirty_have&&nvn_dirty_range_epoch_unchanged(dirty_token,dirty_epoch,t->mem,t->L.size);
+    // 即使纪元采样不稳定也保留 token：池槽复用必须能被识别出来，否则新区间全零的 gen 会被误判成 clean。
+    // Keep the token even when the epoch sample was unstable: slot reuse must remain detectable, or the
+    // new range's all-zero generations would be mistaken for clean.
+    if(e->source_tracked&&dirty_token){e->dirty_token=dirty_token;e->dirty_epoch=dirty_epoch;}
     // 未跟踪来源没有可靠代数，用内容变化辨别后来 CPU 写，仍保留未改源时的 GPU 拷贝。
     // Untracked sources have no reliable generation; compare their bytes while retaining GPU copies if the source is unchanged.
     if(!e->source_tracked)e->source_hash=image_source_hash(source,t->L.size);
@@ -206,8 +234,12 @@ static void image_gpu_written(image_entry *e) {
     const tex_t *t=&e->texture;
     // 已存在的基线代表真正读过的 CPU 版本，重复 GPU 标记不能吞掉尚未读的 CPU 脏写。
     // Existing baselines represent CPU versions actually read; repeated GPU marking cannot consume unread CPU changes.
-    if(t->has_layout&&t->mem&&!e->source_valid){nvn_dirty_protect(t->mem,t->L.size);image_source_baseline(e,t->mem,nvn_dirty_now());}
-    e->populated=1;e->stamp=0;e->gpu_written=1;
+    if(t->has_layout&&t->mem&&!e->source_valid){uint64_t token=0,epoch=0;int have=nvn_dirty_range_epoch(t->mem,t->L.size,&token,&epoch);nvn_dirty_protect(t->mem,t->L.size);image_source_baseline(e,t->mem,nvn_dirty_now(),token,epoch,have);}
+    // 只有状态真的变了才推进纪元：附件每绘制都会被标记，无条件递增会让依赖记忆永远失效。
+    // Advance the epoch only on a real state change: attachments are marked every draw, and an unconditional
+    // bump would invalidate the dependency memo forever.
+    int changed=!e->populated||e->stamp!=0;
+    e->populated=1;e->stamp=0;e->gpu_written=1;if(changed)image_state_epoch++;
 }
 // 只读计数：GPU 渲染过的贴图又被整张从客体内存上传回去，等于用旧字节覆盖刚渲染出来的内容。
 // Read-only counter: an image the GPU rendered is uploaded whole from guest memory again, overwriting freshly
@@ -221,8 +253,26 @@ static void image_upload(image_entry *e) {
     int pending=t->mem && snapshot_pending((uintptr_t)t->mem,t->L.size);
     if(e->populated&&!pending){
         if(t->has_layout&&t->mem){
-            if(e->source_valid){int tracked=nvn_dirty_tracked(t->mem,t->L.size);
-                if(tracked&&e->source_tracked){uint64_t now=nvn_dirty_now();int clean=now==e->source_seen||!nvn_dirty_since(t->mem,t->L.size,e->source_stamp);e->source_seen=now;if(clean)return;}
+            if(e->source_valid){
+                // 区间纪元未变 = 自上次取样后这张图所在的池没有任何写：无需查 tracked 或逐页扫描。
+                // An unchanged range epoch means no write anywhere in the covering pool since the last sample,
+                // so neither the tracked lookup nor the per-page scan is needed.
+                if(e->dirty_epoch_valid&&nvn_dirty_range_epoch_unchanged(e->dirty_token,e->dirty_epoch,t->mem,t->L.size)){image_clean_epoch_hits++;return;}
+                int tracked=nvn_dirty_tracked(t->mem,t->L.size);
+                if(tracked&&e->source_tracked){uint64_t now=nvn_dirty_now();
+                    uint64_t token=0,epoch=0;int have_epoch=nvn_dirty_range_epoch(t->mem,t->L.size,&token,&epoch);
+                    // 区间身份变了（池销毁后复用槽）时不能相信旧 stamp，直接当作脏的重传。
+                    // A changed range identity (slot reuse after pool destruction) cannot trust the old stamp;
+                    // treat it as dirty and re-upload.
+                    int range_reused=e->dirty_token&&token&&token!=e->dirty_token;
+                    // 上传开始时池尚未登记（token=0）或当前池表正在变更，旧基线没有可用身份；
+                    // 对 CPU 来源强制重传一次拿到稳定基线。GPU 渲染目标不强制上传，否则会用客体旧字节覆盖刚渲染的内容。
+                    // A baseline with no token (pool registered mid-upload) or a range table in flux has no
+                    // usable identity; force one re-upload for CPU sources. GPU render targets are exempt:
+                    // uploading them would overwrite freshly rendered content with stale guest bytes.
+                    int unpinned=!e->dirty_token||(!token&&!e->gpu_written);
+                    int clean=!unpinned&&!range_reused&&(now==e->source_seen||!nvn_dirty_since(t->mem,t->L.size,e->source_stamp));e->source_seen=now;
+                    if(clean){if(have_epoch&&nvn_dirty_range_epoch_unchanged(token,epoch,t->mem,t->L.size)){e->dirty_token=token;e->dirty_epoch=epoch;e->dirty_epoch_valid=1;}else e->dirty_epoch_valid=0;image_clean_epoch_misses++;return;}}
                 else if(!tracked&&!e->source_tracked&&image_source_hash(t->mem,t->L.size)==e->source_hash)return;
             }
         }else if(!e->stamp||!nvn_dirty_since(t->mem,t->L.size,e->stamp))return;
@@ -231,7 +281,12 @@ static void image_upload(image_entry *e) {
     if((e->aspect & VK_IMAGE_ASPECT_STENCIL_BIT) && (e->aspect & VK_IMAGE_ASPECT_DEPTH_BIT))die("Vulkan combined depth/stencil CPU upload pending");
     // 与原后端一样先保护再取代数和读取，减少并发写入漏记的窗口。
     // Like the original backend, protect before taking the generation/reading to avoid a window for untracked concurrent writes.
-    graphics_pass_end();nvn_dirty_protect(t->mem,t->L.size);uint64_t stamp=nvn_dirty_now();image_access(e,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);uint8_t *shadow=NULL;const uint8_t *storage=t->mem;
+    // 在 protect 甚至 sampling 之前采样基线；protect 会跳过 BUSY 页，若在其后采样可能吸收一次已完成的写。
+    // Sample the baseline before protect (and before the read); protect skips BUSY pages, so sampling after it
+    // could absorb a write that already completed.
+    graphics_pass_end();uint64_t base_token=0,base_epoch=0;int base_have=nvn_dirty_range_epoch(t->mem,t->L.size,&base_token,&base_epoch);nvn_dirty_protect(t->mem,t->L.size);uint64_t stamp=nvn_dirty_now();image_access(e,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);uint8_t *shadow=NULL;const uint8_t *storage=t->mem;
+    // 读取期间若有写打断，baseline 会因为纪元已变而拒绝把它当作 clean。
+    // If a write interrupts the read, the baseline refuses to treat it as clean because the epoch changed.
     // 上传必须看到同批前面的复制，不提前发布客体内存。
     // Uploads must see preceding copies in the batch without publishing guest memory early.
     // 未跟踪 packaged 源也冻结一份快照，不能上传旧字节后把并发改写的新字节记为已上传。
@@ -275,7 +330,7 @@ static void image_upload(image_entry *e) {
         }
     }
     if(e->gpu_written){image_gpu_overwrites++;if(image_gpu_overwrites<=6||!(image_gpu_overwrites%64))LOG("[vulkan-upload] 覆盖 GPU 已渲染内容 serial=%llu %ux%u format=%#x bytes=%llu 第 %llu 次（客体内存里没有 GPU 那次渲染的结果）",(unsigned long long)t->serial,t->d.width,t->d.height,t->d.format,(unsigned long long)t->L.size,(unsigned long long)image_gpu_overwrites);}
-    image_source_baseline(e,storage,stamp);free(shadow);e->populated=1;e->stamp=stamp;texture_uploads++;
+    image_source_baseline(e,storage,stamp,base_token,base_epoch,base_have);free(shadow);e->populated=1;e->stamp=stamp;texture_uploads++;image_state_epoch++;
 }
 static VkImageSubresourceRange texture_range(image_entry *e,const view_t *v) {
     VkImageSubresourceRange r={e->aspect,v&&v->set_levels?v->base_level:0,1,v&&v->set_layers?v->min_layer:0,1};
@@ -568,18 +623,18 @@ static void copy_texture_texture(const p_copy_t2t *c) {
     image_gpu_written(dst);
 }
 void mtl_set_tex_pool_n(int n) {
-    if(n<0||n>1048576)die("Vulkan texture descriptor capacity %d",n);pthread_mutex_lock(&descriptor_lock);
-    if(n>texture_capacity){texture_descriptor *next=realloc(texture_descriptors,n*sizeof *next);if(!next)die("Vulkan descriptor allocation");memset(next+texture_capacity,0,(n-texture_capacity)*sizeof *next);texture_descriptors=next;texture_capacity=n;}pthread_mutex_unlock(&descriptor_lock);
+    if(n<0||n>1048576)die("Vulkan texture descriptor capacity %d",n);pthread_mutex_lock(&descriptor_lock);descriptor_write_begin();
+    if(n>texture_capacity){texture_descriptor *next=realloc(texture_descriptors,n*sizeof *next);if(!next)die("Vulkan descriptor allocation");memset(next+texture_capacity,0,(n-texture_capacity)*sizeof *next);texture_descriptors=next;texture_capacity=n;}descriptor_write_end();pthread_mutex_unlock(&descriptor_lock);
 }
-void mtl_reg_tex(int id,const tex_t *t,const view_t *v) {pthread_mutex_lock(&descriptor_lock);if(id<0||id>=texture_capacity)die("Vulkan texture descriptor index %d",id);texture_descriptors[id]=(texture_descriptor){.valid=1,.texture=*t};if(v){texture_descriptors[id].view=*v;static unsigned view_diagnostics;if(v->set_format&&v->format!=t->d.format&&view_diagnostics++<12)LOG("[vulkan] texture view format texture=%#x view=%#x serial=%llu",t->d.format,v->format,(unsigned long long)t->serial);}pthread_mutex_unlock(&descriptor_lock);}
+void mtl_reg_tex(int id,const tex_t *t,const view_t *v) {pthread_mutex_lock(&descriptor_lock);descriptor_write_begin();if(id<0||id>=texture_capacity)die("Vulkan texture descriptor index %d",id);texture_descriptors[id]=(texture_descriptor){.valid=1,.texture=*t};if(v){texture_descriptors[id].view=*v;static unsigned view_diagnostics;if(v->set_format&&v->format!=t->d.format&&view_diagnostics++<12)LOG("[vulkan] texture view format texture=%#x view=%#x serial=%llu",t->d.format,v->format,(unsigned long long)t->serial);}descriptor_write_end();pthread_mutex_unlock(&descriptor_lock);}
 void mtl_reg_samp(int id,const samp_par *p) {
-    if(id<0||id>1048576)die("Vulkan sampler descriptor index %d",id);pthread_mutex_lock(&descriptor_lock);
+    if(id<0||id>1048576)die("Vulkan sampler descriptor index %d",id);pthread_mutex_lock(&descriptor_lock);descriptor_write_begin();
     if(id>=sampler_capacity){int n=(id+64)&~63;sampler_descriptor *next=realloc(sampler_descriptors,n*sizeof *next);if(!next)die("Vulkan sampler allocation");memset(next+sampler_capacity,0,(n-sampler_capacity)*sizeof *next);sampler_descriptors=next;sampler_capacity=n;}
-    sampler_descriptors[id].valid=1;sampler_descriptors[id].parameters=*p;sampler_descriptors[id].sampler=VK_NULL_HANDLE;pthread_mutex_unlock(&descriptor_lock);
+    sampler_descriptors[id].valid=1;sampler_descriptors[id].parameters=*p;sampler_descriptors[id].sampler=VK_NULL_HANDLE;descriptor_write_end();pthread_mutex_unlock(&descriptor_lock);
 }
 void mtl_tex_release(tex_t *t) {
     if(!device)return;mtl_finish();pthread_mutex_lock(&queue_lock);image_entry **link=&image_list;while(*link&&(*link)->serial!=t->serial)link=&(*link)->next;
-    if(*link){image_entry *e=*link;graphics_cache_forget_image(e);*link=e->next;image_entry **hash=&image_index[e->serial&4095];while(*hash&&*hash!=e)hash=&(*hash)->hash_next;if(!*hash)die("Vulkan image index corruption");*hash=e->hash_next;while(e->views){cached_image_view *v=e->views;e->views=v->next;vkDestroyImageView(device,v->view,NULL);free(v);}vkDestroyImageView(device,e->view,NULL);vkDestroyImage(device,e->image,NULL);vkFreeMemory(device,e->memory,NULL);free(e);}pthread_mutex_unlock(&queue_lock);
+    if(*link){image_entry *e=*link;graphics_cache_forget_image(e);*link=e->next;image_entry **hash=&image_index[e->serial&4095];while(*hash&&*hash!=e)hash=&(*hash)->hash_next;if(!*hash)die("Vulkan image index corruption");*hash=e->hash_next;while(e->views){cached_image_view *v=e->views;e->views=v->next;vkDestroyImageView(device,v->view,NULL);free(v);}vkDestroyImageView(device,e->view,NULL);vkDestroyImage(device,e->image,NULL);vkFreeMemory(device,e->memory,NULL);free(e);image_state_epoch++;}pthread_mutex_unlock(&queue_lock);
 }
 void mtl_read_texels(const tex_t *t,unsigned level,unsigned layer,const NVNcopyRegion *r,uint8_t *dst,size_t row,size_t img) {
     if(r->width<=0||r->height<=0||r->depth<=0)return;mtl_sub_begin();dependencies_prepare_texture(t);image_entry *e=image_get(t);image_upload(e);

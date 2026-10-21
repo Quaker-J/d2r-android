@@ -119,6 +119,7 @@ static void graphics_cache_forget_image(image_entry *image) {
     }
 }
 static int graphics_shader_writes(const shader_entry *shader) {
+    if(shader->flags_valid)return shader->writes;
     for(unsigned i=0;i<shader->count;i++){const shader_binding *binding=&shader->bindings[i];if((binding->kind==2&&(binding->flags&1))||(binding->kind==4&&(binding->flags&4)))return 1;}
     return 0;
 }

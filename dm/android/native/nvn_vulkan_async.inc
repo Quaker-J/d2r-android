@@ -97,6 +97,12 @@ static void post0_publish_report(void) {
     frame=presents;calls=post0_calls;bytes=post0_bytes;fallback_calls=post0_fallback_calls;fallback_bytes=post0_fallback_bytes;previous=stats;errno=saved_errno;
 }
 static uint64_t snapshot_known_copy_hits,snapshot_known_copy_read_saved,snapshot_known_copy_overlay_saved,snapshot_known_copy_final_bytes;
+// 新 unknown/host 范围只由录制线程登记；异步 worker 只能在 commit 窗口回收，回收只会让 clean 更成立。
+// 贴图依赖的 clean 记忆因此只需在新登记时失效。
+// New unknown/host ranges are registered only by the recording thread; the async worker can retire ranges
+// only in commit windows, and retirement only makes cleanliness more true. The texture-dependency clean memo
+// therefore needs invalidation only on new registrations.
+static uint64_t pending_unknown_epoch;
 static uint64_t pending_index_queries[2],pending_index_nodes[2],pending_index_empty[2],pending_index_registered[2],pending_index_peak_records;
 #ifdef DM_VK_REFERENCE_GATES
 static uint64_t pending_index_oracle_queries,pending_index_oracle_nodes;
@@ -122,8 +128,9 @@ static void post_register_range(post_op *p) {
             }
             batch->has_known_cpu_copy=1;
         }
-        p->range_registered=1;return;}
+        p->range_registered=1;pending_unknown_epoch++;return;}
     if(dm_pending_ranges_insert(&async_current->pending_ranges,kind,address,bytes,p->order)!=1)die("Vulkan pending range insert: %s",strerror(errno));
+    pending_unknown_epoch++;
     p->range_registered=1;pending_index_registered[kind]++;
     uint64_t records=async_current->pending_ranges.collections[0].count+async_current->pending_ranges.collections[1].count;
     if(records>pending_index_peak_records)pending_index_peak_records=records;
@@ -252,6 +259,13 @@ static int async_known_copy_chain(const post_op *copies,const post_op *posts,int
 static int async_known_copy_may_overlap(const async_batch *batch,uintptr_t address,uint64_t size) {
     return batch&&batch->has_known_cpu_copy&&(batch->known_copy_unbounded||
         (address<batch->known_copy_high&&batch->known_copy_low<address+size));
+}
+// 请求范围与所有在途已知复制都不重叠时，客体源就是该范围的当前内容；可按范围开启直比快路。
+// When the requested range overlaps no in-flight known copy, the guest source is current for that range,
+// so the direct-compare fast path can open per range instead of being disabled by an unrelated copy.
+static int async_no_known_copy_overlap(uintptr_t address,uint64_t size) {
+    for(const async_batch *b=async_first;b;b=b->next)if(async_known_copy_may_overlap(b,address,size))return 0;
+    return !async_current||!async_known_copy_may_overlap(async_current,address,size);
 }
 static int async_read_known_full_copy(uintptr_t address,void *destination,uint64_t size) {
     // queue_lock 保证复制源仍不可变且未退役；只省客体整段读取和旧覆盖，不改变发布顺序。

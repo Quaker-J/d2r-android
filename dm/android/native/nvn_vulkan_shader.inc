@@ -1,9 +1,16 @@
 // 预编译 SPIR-V、描述符绑定及计算提交。| Precompiled SPIR-V, descriptor binding and compute submission.
 typedef struct { uint32_t kind,binding,slot,cb_slot,cb_offset,handle,type,count,flags,separate; } shader_binding;
 typedef struct { VkDescriptorType type; uint32_t offset; int storage_slot,uniform_pointer,dynamic_index; } shader_binding_plan;
+typedef struct { uint32_t handle; uint64_t pending_epoch,image_epoch,descriptor_epoch; uint8_t clean; } shader_dep_texture;
 typedef struct shader_entry {
     char key[17]; uint32_t stage,set,count,c1_size,attributes[32];
     shader_binding *bindings; uint8_t *c1; VkShaderModule module; VkDescriptorSetLayout layout;
+    // 反射加载后不变的写标记：逐绘制再扫全部 binding 只为了回答这两个问题。
+    // Write flags fixed after reflection load: rescanning every binding per draw only answered these two questions.
+    uint8_t flags_valid,writes,host_writes;
+    // 每个贴图元素的“上次检查为 clean”记忆；由 pending/图像/注册纪元统一失效。
+    // Per-texture-element "last check was clean" memo, invalidated by the pending/image/registration epochs.
+    shader_dep_texture *dep_textures;
     shader_binding_plan *binding_plan; uint32_t buffer_count,image_count,texel_count,dynamic_count;
     VkPipelineLayout compute_layout; VkPipeline compute_pipeline;
     vk_buffer constant_buffer;
@@ -157,7 +164,12 @@ static shader_entry *shader_load_by_key(const char *key,int stats,int fatal) {
     {unsigned dynamic_sum=0;
      for(unsigned i=0;i<s->count;i++)if(s->binding_plan[i].type==VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC)dynamic_sum+=s->bindings[i].count;
      if(s->dynamic_count!=dynamic_sum)die("Vulkan dynamic uniform placement: shader=%s placed=%u expected=%u",s->key,s->dynamic_count,dynamic_sum);}
-    VkDescriptorSetLayoutCreateInfo li={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,.bindingCount=s->count,.pBindings=bindings};VK_CHECK(vkCreateDescriptorSetLayout(device,&li,NULL,&s->layout));s->next=shader_list;shader_list=s;
+    if(s->image_count){s->dep_textures=calloc(s->image_count,sizeof *s->dep_textures);if(!s->dep_textures)die("Vulkan shader dependency memo allocation");}
+    VkDescriptorSetLayoutCreateInfo li={.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,.bindingCount=s->count,.pBindings=bindings};VK_CHECK(vkCreateDescriptorSetLayout(device,&li,NULL,&s->layout));
+    for(unsigned i=0;i<s->count;i++){const shader_binding *b=&s->bindings[i];
+        if((b->kind==2&&(b->flags&1))||(b->kind==4&&(b->flags&4)))s->writes=1;
+        if((b->kind==2&&(b->flags&1))||(b->kind==4&&(b->type&255)==2&&(b->flags&4)))s->host_writes=1;}
+    s->flags_valid=1;s->next=shader_list;shader_list=s;
     pthread_mutex_unlock(&graphics_object_lock);
     if(stats)resource_create_end(0,creation,s->key,NULL);LOG("[vulkan] shader %s stage=%u bindings=%u dynamic_uniforms=%u",s->key,s->stage,s->count,s->dynamic_count);return s;
 }
@@ -186,8 +198,25 @@ static void program_remove(const prog_t *program) {
 static VkSamplerAddressMode wrap_mode(unsigned wrap) {switch(wrap){case 1:return VK_SAMPLER_ADDRESS_MODE_REPEAT;case 6:return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;case 4:case 5:return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;default:return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;}}
 #include "nvn_vulkan_sampler.inc"
 
+// 一次绘制里同一贴图/采样器句柄会被绑定和依赖预检各查询一次；注册纪元未变时直接复用副本，
+// 不再逐次进 descriptor_lock。注册频率远低于绑定频率，纪元把正确性边界压在真实写入上。
+// One draw queries the same texture/sampler handle from both binding and dependency preflight; while the
+// registration epoch is unchanged the copy is reused instead of taking descriptor_lock every time.
+typedef struct { int id; uint64_t epoch; texture_descriptor descriptor; } texture_read_cache_entry;
+static texture_read_cache_entry texture_read_caches[256];
 static texture_descriptor descriptor_texture(int id) {
-    texture_descriptor d={0};pthread_mutex_lock(&descriptor_lock);if(id>=0&&id<texture_capacity)d=texture_descriptors[id];pthread_mutex_unlock(&descriptor_lock);return d;
+    texture_descriptor d={0};if(id<0)return d;
+    uint64_t epoch=atomic_load_explicit(&descriptor_read_epoch,memory_order_acquire);
+    if(!(epoch&1)){
+        texture_read_cache_entry *entry=&texture_read_caches[(unsigned)id&255];
+        if(entry->id==id&&entry->epoch==epoch){d=entry->descriptor;if(descriptor_read_stable(epoch)){texture_read_cache_hits++;return d;}}
+    }
+    pthread_mutex_lock(&descriptor_lock);if(id<texture_capacity)d=texture_descriptors[id];pthread_mutex_unlock(&descriptor_lock);
+    if(descriptor_read_stable(epoch)){
+        texture_read_cache_entry *entry=&texture_read_caches[(unsigned)id&255];
+        entry->id=id;entry->epoch=epoch;entry->descriptor=d;texture_read_cache_misses++;
+    }
+    return d;
 }
 static image_entry *descriptor_image(const texture_descriptor *d,uint32_t type,int storage,VkPipelineStageFlags stage,VkAccessFlags access) {
     if(d->valid){image_entry *e=image_get(&d->texture);if(!storage||(e->texture.has_layout&&e->texture.mem))image_upload(e);if(storage)image_gpu_written(e);image_access(e,stage,access);draw_sampled_note(e);return e;}
@@ -196,7 +225,7 @@ static image_entry *descriptor_image(const texture_descriptor *d,uint32_t type,i
     static tex_t dummy[2][32];unsigned index=(type&255)+(!!(type&256))*6+(!!(type&1024))*12;if(index>=32)die("Dummy texture type %u",type);
     tex_t *t=&dummy[!!storage][index];
     if(!t->serial){t->serial=UINT64_MAX-index-(!!storage)*32;t->d=(nvn_texdesc){.target=(type&255)==4?NVN_TEXTURE_TARGET_3D:(type&255)==5?NVN_TEXTURE_TARGET_CUBEMAP:(type&256)?NVN_TEXTURE_TARGET_2D_ARRAY:NVN_TEXTURE_TARGET_2D,.width=1,.height=1,.depth=(type&255)==5?6:1,.levels=1,.format=(type&1024)?NVN_FORMAT_DEPTH32F:NVN_FORMAT_RGBA8};nvn_tex_layout(&t->d,&t->L);}
-    image_entry *e=image_get(t);if(!e->populated){image_access(e,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);VkClearColorValue zero={0};VkImageSubresourceRange r={e->aspect,0,1,0,e->texture.L.layers};if(type&1024){VkClearDepthStencilValue depth={1,0};vkCmdClearDepthStencilImage(command,e->image,e->layout,&depth,1,&r);}else vkCmdClearColorImage(command,e->image,e->layout,&zero,1,&r);e->populated=1;}image_access(e,stage,access);draw_sampled_note(e);return e;
+    image_entry *e=image_get(t);if(!e->populated){image_access(e,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);VkClearColorValue zero={0};VkImageSubresourceRange r={e->aspect,0,1,0,e->texture.L.layers};if(type&1024){VkClearDepthStencilValue depth={1,0};vkCmdClearDepthStencilImage(command,e->image,e->layout,&depth,1,&r);}else vkCmdClearColorImage(command,e->image,e->layout,&zero,1,&r);e->populated=1;image_state_epoch++;}image_access(e,stage,access);draw_sampled_note(e);return e;
 }
 static VkImageView descriptor_view(const texture_descriptor *descriptor,image_entry *e,uint32_t type,int storage) {
     view_t v=descriptor->valid?descriptor->view:(view_t){0};
@@ -366,6 +395,7 @@ static VkDescriptorSet bind_shader(shader_entry *s,post_op *lifetime,uint32_t *d
 }
 #include "nvn_vulkan_dependencies.inc"
 static int shader_host_writes(const shader_entry *s) {
+    if(s->flags_valid)return s->host_writes;
     for(unsigned i=0;i<s->count;i++){const shader_binding *b=&s->bindings[i];if((b->kind==2&&(b->flags&1))||(b->kind==4&&(b->type&255)==2&&(b->flags&4)))return 1;}return 0;
 }
 static void dispatch_compute(const p_dispatch *d) {

@@ -39,6 +39,10 @@ uint64_t now_ns(void);
 // 1 = 在堆权限读锁持有期间复制完整范围；0 = 未写入，调用方必须回退安全 reader。两者保留 errno。
 // 1 = copied the full range under the heap permission read lock; 0 = wrote nothing, caller must use the safe reader. Both preserve errno.
 int dm_android_guest_heap_copy_owned(uintptr_t source, void *destination, size_t size);
+// 1 = 租约内逐字节相等；0 = 租约内不等；-1 = 不在堆内/租约不可用（调用方必须走原安全路径）。
+// 1 = byte-equal under the lease; 0 = different under the lease; -1 = outside the heap or lease unavailable
+// (the caller must take the original safe path).
+int dm_android_guest_heap_compare_owned(uintptr_t source, const void *expected, size_t size);
 #endif
 uint64_t guest_ns(void);              // 客体时钟（hle_os.c；DM_TICK_HOLD 冻结时不走） | Guest clock (hle_os.c; does not advance while DM_TICK_HOLD is frozen)
 int dm_detclock_enabled(void);

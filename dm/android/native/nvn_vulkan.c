@@ -71,6 +71,8 @@ extern void dm_android_window_frame_period(double period);
 // Standalone GPU fixtures have no HLE heap; unresolved symbols retain safe reads, while games must link and report real hits.
 extern int dm_android_guest_heap_copy_owned(uintptr_t address,void *destination,size_t size);
 #pragma weak dm_android_guest_heap_copy_owned
+extern int dm_android_guest_heap_compare_owned(uintptr_t source,const void *expected,size_t size);
+#pragma weak dm_android_guest_heap_compare_owned
 // 独立 GPU 夹具可不链接真实脏页模块；日志明确 API 是否存在。
 // Standalone GPU fixtures may omit the real dirty tracker; logs explicitly report API availability.
 #pragma weak nvn_dirty_diagnose_write_marks
@@ -86,6 +88,13 @@ extern int dm_android_guest_heap_copy_owned(uintptr_t address,void *destination,
 static int snapshot_heap_api_available(void) {
 #ifdef __ANDROID__
     return dm_android_guest_heap_copy_owned!=NULL;
+#else
+    return 0;
+#endif
+}
+static int snapshot_heap_compare_available(void) {
+#ifdef __ANDROID__
+    return dm_android_guest_heap_compare_owned!=NULL;
 #else
     return 0;
 #endif
@@ -1011,8 +1020,14 @@ uint64_t mtl_present(const tex_t *t, double period, const int crop[4]) {
     if(ticket==1){perf_passes=render_passes;perf_barriers=image_barriers;}
     else if(ticket%60==0){unsigned frames=ticket==60?59:60;LOG("[vulkan-passes] frame=%llu passes/frame=%.1f image_barriers/frame=%.1f UBO_arena=%.1f MB driver_hits=%llu layout/pass/frame objects=%llu/%llu/%llu",(unsigned long long)ticket,(render_passes-perf_passes)/(double)frames,(image_barriers-perf_barriers)/(double)frames,uniform_arena_bytes/1048576.,(unsigned long long)uniform_driver_hits,(unsigned long long)graphics_layout_creations,(unsigned long long)graphics_pass_creations,(unsigned long long)graphics_frame_creations);perf_passes=render_passes;perf_barriers=image_barriers;}
     static uint64_t binding_hits,binding_misses,descriptor_hits,descriptor_misses,binding_bytes,binding_compare,binding_copy,dependency_waits,binding_overwrites,binding_uploads,binding_unregistered;
-    if(ticket==1){binding_hits=uniform_version_hits;binding_misses=uniform_version_misses;descriptor_hits=descriptor_version_hits;descriptor_misses=descriptor_version_misses;binding_bytes=uniform_version_read_bytes;binding_compare=uniform_version_compare_bytes;binding_copy=uniform_version_copy_bytes;dependency_waits=dependency_flushes;}
-    else if(ticket%60==0){unsigned frames=ticket==60?59:60;LOG("[vulkan-bindings] frame=%llu UBO byte_hits/miss=%.1f/%.1f descriptors hits/miss=%.1f/%.1f UBO_read=%.2f MB/frame UBO_compare=%.2f MB/frame UBO_arena_copy=%.2f MB/frame dependency_wait=%.1f/frame gpu_overwrite=%.2f/frame uploads=%.2f/frame unregistered_tex=%.2f/frame",(unsigned long long)ticket,(uniform_version_hits-binding_hits)/(double)frames,(uniform_version_misses-binding_misses)/(double)frames,(descriptor_version_hits-descriptor_hits)/(double)frames,(descriptor_version_misses-descriptor_misses)/(double)frames,(uniform_version_read_bytes-binding_bytes)/(frames*1048576.),(uniform_version_compare_bytes-binding_compare)/(frames*1048576.),(uniform_version_copy_bytes-binding_copy)/(frames*1048576.),(dependency_flushes-dependency_waits)/(double)frames,(image_gpu_overwrites-binding_overwrites)/(double)frames,(texture_uploads-binding_uploads)/(double)frames,(gpu_unregistered_textures-binding_unregistered)/(double)frames);binding_unregistered=gpu_unregistered_textures;binding_hits=uniform_version_hits;binding_misses=uniform_version_misses;descriptor_hits=descriptor_version_hits;descriptor_misses=descriptor_version_misses;binding_bytes=uniform_version_read_bytes;binding_compare=uniform_version_compare_bytes;binding_copy=uniform_version_copy_bytes;dependency_waits=dependency_flushes;binding_overwrites=image_gpu_overwrites;binding_uploads=texture_uploads;}
+    static uint64_t binding_ubo_fast,binding_ubo_direct,binding_tex_read,binding_samp_read,binding_image_clean,binding_dep_tex;
+    if(ticket==1){binding_hits=uniform_version_hits;binding_misses=uniform_version_misses;descriptor_hits=descriptor_version_hits;descriptor_misses=descriptor_version_misses;binding_bytes=uniform_version_read_bytes;binding_compare=uniform_version_compare_bytes;binding_copy=uniform_version_copy_bytes;dependency_waits=dependency_flushes;
+        binding_ubo_fast=uniform_compare_fast_hits;binding_ubo_direct=uniform_direct_copies;binding_tex_read=texture_read_cache_hits;binding_samp_read=sampler_read_cache_hits;binding_image_clean=image_clean_epoch_hits;binding_dep_tex=dependency_texture_memo_hits;}
+    else if(ticket%60==0){unsigned frames=ticket==60?59:60;LOG("[vulkan-bindings] frame=%llu UBO byte_hits/miss=%.1f/%.1f descriptors hits/miss=%.1f/%.1f UBO_read=%.2f MB/frame UBO_compare=%.2f MB/frame UBO_arena_copy=%.2f MB/frame dependency_wait=%.1f/frame gpu_overwrite=%.2f/frame uploads=%.2f/frame unregistered_tex=%.2f/frame ubo_compare_fast/direct=%.1f/%.1f tex/samp_read_fast=%.1f/%.1f image_clean_fast=%.1f dep_tex_memo=%.1f",
+        (unsigned long long)ticket,(uniform_version_hits-binding_hits)/(double)frames,(uniform_version_misses-binding_misses)/(double)frames,(descriptor_version_hits-descriptor_hits)/(double)frames,(descriptor_version_misses-descriptor_misses)/(double)frames,(uniform_version_read_bytes-binding_bytes)/(frames*1048576.),(uniform_version_compare_bytes-binding_compare)/(frames*1048576.),(uniform_version_copy_bytes-binding_copy)/(frames*1048576.),(dependency_flushes-dependency_waits)/(double)frames,(image_gpu_overwrites-binding_overwrites)/(double)frames,(texture_uploads-binding_uploads)/(double)frames,(gpu_unregistered_textures-binding_unregistered)/(double)frames,
+        (uniform_compare_fast_hits-binding_ubo_fast)/(double)frames,(uniform_direct_copies-binding_ubo_direct)/(double)frames,(texture_read_cache_hits-binding_tex_read)/(double)frames,(sampler_read_cache_hits-binding_samp_read)/(double)frames,(image_clean_epoch_hits-binding_image_clean)/(double)frames,(dependency_texture_memo_hits-binding_dep_tex)/(double)frames);
+        binding_unregistered=gpu_unregistered_textures;binding_hits=uniform_version_hits;binding_misses=uniform_version_misses;descriptor_hits=descriptor_version_hits;descriptor_misses=descriptor_version_misses;binding_bytes=uniform_version_read_bytes;binding_compare=uniform_version_compare_bytes;binding_copy=uniform_version_copy_bytes;dependency_waits=dependency_flushes;binding_overwrites=image_gpu_overwrites;binding_uploads=texture_uploads;
+        binding_ubo_fast=uniform_compare_fast_hits;binding_ubo_direct=uniform_direct_copies;binding_tex_read=texture_read_cache_hits;binding_samp_read=sampler_read_cache_hits;binding_image_clean=image_clean_epoch_hits;binding_dep_tex=dependency_texture_memo_hits;}
     static uniform_read_counters uniform_read_previous;
     if(ticket==1)uniform_read_previous=uniform_read_stats;
     else if(ticket%60==0){unsigned frames=ticket==60?59:60;const uniform_read_counters *s=&uniform_read_stats;

@@ -60,7 +60,7 @@ typedef struct {
     va_st attributes[16]; vs_st streams[16]; color_st color; chmask_st mask;
     blend_st blend[8]; poly_st polygon; ds_st depth; ms_st multisample;
 } pipeline_key;
-typedef struct pipeline_entry { pipeline_key key; VkPipeline pipeline; struct pipeline_entry *next; } pipeline_entry;
+typedef struct pipeline_entry { pipeline_key key; VkPipeline pipeline; VkPipelineLayout layout; struct pipeline_entry *next; } pipeline_entry;
 static pipeline_entry *graphics_pipelines[2048];
 static uint64_t pipeline_creations, pipeline_reuses;
 static pipeline_entry *graphics_last_pipeline;
@@ -154,7 +154,7 @@ static void draw_graphics_inner(const p_draw *draw,const p_draw_idx *indexed) {
     sets[0]=bind_shader(vs,NULL,dynamic_offsets,&dynamic_count);
     sets[1]=bind_shader(fs,NULL,dynamic_offsets,&dynamic_count);
     dm_cpu_phase_end(DM_CPU_PHASE_BIND,bind_phase);
-    uint64_t layout_phase=dm_cpu_phase_begin();VkPipelineLayout layout=graphics_layout_get(vs,fs);dm_cpu_phase_end(DM_CPU_PHASE_LAYOUT,layout_phase);
+    VkPipelineLayout layout;
     // 附件的 initial/final 用"角色常量"而不是图像此刻的布局：所有转换都交给通道开始前那次 image_access。
     // 这样通道对象与帧缓冲不随图像历史变化，通道键不必扩字段，预热与运行期仍然同键。
     // Attachment initial/final use the role's constant layout rather than the image's current one, with every
@@ -278,11 +278,15 @@ static void draw_graphics_inner(const p_draw *draw,const p_draw_idx *indexed) {
     if(cached&&!memcmp(&cached->key,&key,sizeof key))pipeline_last_hits++;
     else{pipeline_hash_calls++;pipeline_bucket=graphics_hash(&key,sizeof key)&2047;cached=graphics_pipelines[pipeline_bucket];while(cached&&memcmp(&cached->key,&key,sizeof key))cached=cached->next;}
     if(!cached){resource_create_start creation=resource_create_begin();cached=calloc(1,sizeof *cached);if(!cached)die("Vulkan pipeline cache allocation");cached->key=key;
+        // 布局与 (vs,fs) 一一对应；只在真正创建管线时查一次，命中路径直接复用同一条目里的对象。
+        // A layout is unique per (vs,fs): resolve it once when the pipeline is created and reuse the object
+        // stored in the same entry on hits.
+        uint64_t layout_phase=dm_cpu_phase_begin();layout=graphics_layout_get(vs,fs);dm_cpu_phase_end(DM_CPU_PHASE_LAYOUT,layout_phase);cached->layout=layout;
         // 只有未命中才派生创建管线的状态；每 draw 的动态状态仍在下面独立提交。创建与预热共用 graphics_pipeline_create，驱动缓存键一致。
         // Derive pipeline-creation state only on a miss; per-draw dynamic state is applied separately below. Creation shares graphics_pipeline_create with warm-up so driver cache keys agree.
         VK_CHECK(graphics_pipeline_create(&key,vs,fs,frame->key.pass,layout,&cached->pipeline,1));
         cached->next=graphics_pipelines[pipeline_bucket];graphics_pipelines[pipeline_bucket]=cached;pipeline_creations++;resource_create_end(1,creation,vs->key,fs->module?fs->key:NULL);
-        pso_record_graphics(vs,fs,&frame->key.pass->key,&key);}else pipeline_reuses++;
+        pso_record_graphics(vs,fs,&frame->key.pass->key,&key);}else{layout=cached->layout;pipeline_reuses++;}
     graphics_last_pipeline=cached;
     graphics_pass_begin(frame);
     graphics_command_apply(cached->pipeline,layout,sets,dynamic_offsets,dynamic_count,&viewport,&scissor,state.blend_color.rgba,state.polygon_offset.units,state.polygon_offset.factor,state.stencil_faces);
